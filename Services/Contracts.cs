@@ -92,6 +92,7 @@ public interface ICombatProvider
     string? AvailabilityError { get; }
     string? PrepareForSession();
     Task<CombatResult> KillAsync(IBattleNpc target, CancellationToken cancellationToken);
+    void EndSession();
 }
 
 public sealed record CombatResult(bool Success, string? Error = null);

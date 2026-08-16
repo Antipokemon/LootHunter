@@ -6,11 +6,12 @@ LootHunter is a standalone Dalamud plugin for building material lists and automa
 
 LootHunter does **not** require Henchman or GatherBuddyReborn to be installed. The automation and farm-state logic are implemented directly in LootHunter.
 
-Required capability plugins for the first version:
+Required capability plugins:
 
 - **Lifestream** — teleportation
 - **vnavmesh** — local pathfinding and movement
-- **BossModReborn** — combat autorotation
+- **WrathCombo** — preferred combat autorotation
+- **BossModReborn** — optional fallback combat autorotation
 
 LootHunter loads structured monster-drop and spawn data directly from the `LuminaSupplemental.Excel` NuGet package. GatherBuddyReborn was useful as a reference for how that dataset can be consumed, but it is not a runtime dependency. MonsterLootHunter is also not required at runtime; its data model was evaluated during design, while the structured LuminaSupplemental dataset is the primary source in this version.
 
@@ -33,7 +34,7 @@ LootHunter loads structured monster-drop and spawn data directly from the `Lumin
 9. Use vnavmesh to cycle known spawn locations.
 10. Find targets by `BNpcNameId`, not localized display names.
 11. Check the live monster level before combat.
-12. Dismount, select the target, and let the active/configured BossModReborn autorotation preset handle combat actions.
+12. Dismount, select the target, and let WrathCombo autorotation handle combat actions. If WrathCombo IPC is unavailable, LootHunter falls back to BossModReborn.
 13. Compare inventory before and after the kill so completion is based on actual drops rather than kill count.
 14. Re-plan immediately when requested quantities change.
 15. Continue until every enabled list entry is complete.
@@ -47,19 +48,19 @@ LootHunter will not start when:
 - the current class/job is not a combat job,
 - the character is inside a duty,
 - the normal inventory is full,
-- required Lifestream, vnavmesh, or BossModReborn IPC is unavailable,
-- no active/configured BossModReborn autorotation preset is available,
+- required Lifestream, vnavmesh, and combat IPC are unavailable,
+- neither WrathCombo nor BossModReborn can prepare autorotation,
 - an enabled list item has no usable open-world source.
 
 Monster levels are checked twice where possible. Static source levels can be unknown in the primary dataset, so unknown static levels are warnings. The live `IBattleNpc.Level` is authoritative immediately before combat. With **Skip unsafe targets** enabled, a source that is above the configured level threshold is skipped and an alternate source is planned when available.
 
 Unreachable or repeatedly failing sources are excluded for the current farm session so route planning does not endlessly select the same bad target. Empty spawn clusters are retried using the configured pass/respawn limits, then LootHunter switches to an alternate source when one exists.
 
-## BossModReborn behavior
+## Combat behavior
 
-LootHunter uses BossModReborn's public preset IPC to preserve the user's current autorotation preset or temporarily activate the preset configured in LootHunter. It does not depend on Henchman's BossMod wrappers or its AI orchestration. Movement remains under LootHunter/vnavmesh control.
+LootHunter prefers WrathCombo's lease-based IPC for combat. At farm start it registers a LootHunter lease, enables autorotation, marks the current job ready for autorotation, and waits for that asynchronous setup before engaging. The lease remains active across consecutive monsters and is released when the farm session ends. Movement remains under LootHunter/vnavmesh control.
 
-If **BossMod preset name** is blank, LootHunter uses the preset already active in BossModReborn. If a preset name is configured, LootHunter temporarily activates it for combat and restores the previous preset afterward.
+If WrathCombo IPC is unavailable, LootHunter falls back to BossModReborn's public preset IPC. In that fallback path, if **BossMod preset name** is blank, LootHunter creates a small job-specific BossModReborn preset with manual targeting. If a preset name is configured, LootHunter temporarily activates it for combat and restores the previous preset afterward.
 
 ## Commands
 
@@ -71,7 +72,7 @@ If **BossMod preset name** is blank, LootHunter uses the preset already active i
 LootHunter/
 ├── Automation/       Farm state machine and session tracking
 ├── Data/             Direct mob-drop/spawn database
-├── IPC/              Lifestream, vnavmesh, and BossModReborn adapters
+├── IPC/              Lifestream, vnavmesh, WrathCombo, and BossModReborn adapters
 ├── Models/           Loot lists, sources, clusters, plans, progress
 ├── Services/         Inventory, planning, targeting, mounting, safety
 ├── Windows/          List editor, session status, settings
@@ -92,7 +93,7 @@ The release must contain an asset named `LootHunter.zip`. The manifest download 
 
 ## Current limitations
 
-- BossModReborn is the first combat provider. The interface is intentionally isolated so another provider can be added later without changing the planner/state machine.
+- WrathCombo is the preferred combat provider, with BossModReborn retained as a fallback.
 - The primary drop/spawn dataset does not provide a reliable static monster level for every source. Live monsters are checked before engagement.
 - A source in another territory requires an unlocked teleport destination in that territory for this version.
 - Aethernet shard optimization and non-teleport inter-zone traversal are not implemented yet.
@@ -110,6 +111,6 @@ LootHunter uses a layered monster-drop data strategy:
 - For items whose static source/location data is missing or incomplete, LootHunter performs an on-demand lookup using the same FFXIV Console Games Wiki approach popularized by MonsterLootHunter, then maps the returned monster, level, zone, and coordinates back into Dalamud game data.
 - The MonsterLootHunter plugin itself is not required or called at runtime.
 
-The fallback is only queried when LootHunter does not already have a usable static monster source for the requested item.
+The fallback is queried for enabled loot-list items at farm start so static locations can be enriched before routing.
 
 See `THIRD_PARTY_NOTICES.md` for third-party acknowledgements and applicable notices.

@@ -27,7 +27,7 @@ public sealed class Configuration : IPluginConfiguration
     public int MaxNavigationFailuresPerSource { get; set; } = 3;
     public int CombatTimeoutSeconds { get; set; } = 120;
 
-    // Blank means use LootHunter's automatically managed BossModReborn combat preset.
+    // Used only by the BossModReborn fallback provider.
     public string BossModPresetName { get; set; } = string.Empty;
 
     public List<LootList> LootLists { get; set; } = [];

@@ -10,6 +10,8 @@ namespace LootHunter.IPC;
 public sealed class CombatProvider : ICombatProvider
 {
     private const string LootHunterPresetName = "LootHunter Combat";
+    private const string InternalPluginName = "LootHunter";
+    private const string PluginName = "LootHunter";
 
     // BossModReborn's distributed VBM Default currently enables these rotation modules.
     // LootHunter creates a minimal per-job user preset instead of trying to read a
@@ -49,16 +51,25 @@ public sealed class CombatProvider : ICombatProvider
         [42] = "BossMod.Autorotation.xan.PCT",
     };
 
-    private readonly ICallGateSubscriber<string, string?> getPreset;
-    private readonly ICallGateSubscriber<string, bool, bool> createPreset;
-    private readonly ICallGateSubscriber<string> getActivePreset;
-    private readonly ICallGateSubscriber<string, bool> setActivePreset;
-    private readonly ICallGateSubscriber<bool> clearActivePreset;
+    private readonly ICallGateSubscriber<bool> wrathIpcReady;
+    private readonly ICallGateSubscriber<string, string, Guid?> wrathRegisterForLease;
+    private readonly ICallGateSubscriber<Guid, bool, WrathSetResult> wrathSetAutoRotationState;
+    private readonly ICallGateSubscriber<Guid, WrathSetResult> wrathSetCurrentJobAutoRotationReady;
+    private readonly ICallGateSubscriber<bool> wrathIsCurrentJobAutoRotationReady;
+    private readonly ICallGateSubscriber<Guid, WrathAutoRotationConfigOption, object, WrathSetResult> wrathSetAutoRotationConfigState;
+    private readonly ICallGateSubscriber<Guid, object> wrathReleaseControl;
+    private readonly ICallGateSubscriber<string, string?> bossGetPreset;
+    private readonly ICallGateSubscriber<string, bool, bool> bossCreatePreset;
+    private readonly ICallGateSubscriber<string> bossGetActivePreset;
+    private readonly ICallGateSubscriber<string, bool> bossSetActivePreset;
+    private readonly ICallGateSubscriber<bool> bossClearActivePreset;
     private readonly ITargetManager targetManager;
     private readonly IPlayerState playerState;
     private readonly Configuration configuration;
 
     private uint preparedClassJobId;
+    private Guid? wrathLease;
+    private ActiveCombatProvider activeProvider;
 
     public CombatProvider(
         IDalamudPluginInterface pluginInterface,
@@ -69,37 +80,106 @@ public sealed class CombatProvider : ICombatProvider
         this.targetManager = targetManager;
         this.playerState = playerState;
         this.configuration = configuration;
-        getPreset = pluginInterface.GetIpcSubscriber<string, string?>("BossMod.Presets.Get");
-        createPreset = pluginInterface.GetIpcSubscriber<string, bool, bool>("BossMod.Presets.Create");
-        getActivePreset = pluginInterface.GetIpcSubscriber<string>("BossMod.Presets.GetActive");
-        setActivePreset = pluginInterface.GetIpcSubscriber<string, bool>("BossMod.Presets.SetActive");
-        clearActivePreset = pluginInterface.GetIpcSubscriber<bool>("BossMod.Presets.ClearActive");
+        wrathIpcReady = pluginInterface.GetIpcSubscriber<bool>("WrathCombo.IPCReady");
+        wrathRegisterForLease = pluginInterface.GetIpcSubscriber<string, string, Guid?>("WrathCombo.RegisterForLease");
+        wrathSetAutoRotationState = pluginInterface.GetIpcSubscriber<Guid, bool, WrathSetResult>("WrathCombo.SetAutoRotationState");
+        wrathSetCurrentJobAutoRotationReady = pluginInterface.GetIpcSubscriber<Guid, WrathSetResult>("WrathCombo.SetCurrentJobAutoRotationReady");
+        wrathIsCurrentJobAutoRotationReady = pluginInterface.GetIpcSubscriber<bool>("WrathCombo.IsCurrentJobAutoRotationReady");
+        wrathSetAutoRotationConfigState = pluginInterface.GetIpcSubscriber<Guid, WrathAutoRotationConfigOption, object, WrathSetResult>("WrathCombo.SetAutoRotationConfigState");
+        wrathReleaseControl = pluginInterface.GetIpcSubscriber<Guid, object>("WrathCombo.ReleaseControl");
+        bossGetPreset = pluginInterface.GetIpcSubscriber<string, string?>("BossMod.Presets.Get");
+        bossCreatePreset = pluginInterface.GetIpcSubscriber<string, bool, bool>("BossMod.Presets.Create");
+        bossGetActivePreset = pluginInterface.GetIpcSubscriber<string>("BossMod.Presets.GetActive");
+        bossSetActivePreset = pluginInterface.GetIpcSubscriber<string, bool>("BossMod.Presets.SetActive");
+        bossClearActivePreset = pluginInterface.GetIpcSubscriber<bool>("BossMod.Presets.ClearActive");
     }
 
-    public string Name => "BossModReborn";
+    public string Name => activeProvider switch
+    {
+        ActiveCombatProvider.WrathCombo => "WrathCombo",
+        ActiveCombatProvider.BossModReborn => "BossModReborn",
+        _ => IsWrathAvailable ? "WrathCombo" : "BossModReborn",
+    };
 
     public bool IsAvailable
-        => getPreset.HasFunction
-           && createPreset.HasFunction
-           && getActivePreset.HasFunction
-           && setActivePreset.HasFunction
-           && clearActivePreset.HasFunction;
+        => IsWrathAvailable || IsBossModAvailable;
 
     public string? AvailabilityError
         => IsAvailable
             ? null
-            : "BossModReborn preset IPC is unavailable. Install/enable BossModReborn and make sure its preset IPC is available.";
+            : "WrathCombo IPC is unavailable. Install/enable WrathCombo, or install/enable BossModReborn with preset IPC available.";
+
+    private bool IsWrathAvailable
+        => wrathIpcReady.HasFunction
+           && wrathRegisterForLease.HasFunction
+           && wrathSetAutoRotationState.HasFunction
+           && wrathSetCurrentJobAutoRotationReady.HasFunction
+           && wrathIsCurrentJobAutoRotationReady.HasFunction
+           && wrathSetAutoRotationConfigState.HasFunction
+           && wrathReleaseControl.HasAction
+           && SafeWrathIpcReady();
+
+    private bool IsBossModAvailable
+        => bossGetPreset.HasFunction
+           && bossCreatePreset.HasFunction
+           && bossGetActivePreset.HasFunction
+           && bossSetActivePreset.HasFunction
+           && bossClearActivePreset.HasFunction;
 
     public string? PrepareForSession()
     {
-        if (!IsAvailable)
-            return AvailabilityError;
+        EndSession();
 
+        if (IsWrathAvailable)
+        {
+            wrathLease = PrepareWrathForSession();
+            if (wrathLease is not null)
+            {
+                activeProvider = ActiveCombatProvider.WrathCombo;
+                return null;
+            }
+        }
+
+        if (!IsBossModAvailable)
+            return IsWrathAvailable
+                ? "WrathCombo IPC is available, but it could not grant LootHunter autorotation control."
+                : AvailabilityError;
+
+        var bossModError = PrepareBossModForSession();
+        if (bossModError is null)
+            activeProvider = ActiveCombatProvider.BossModReborn;
+        return bossModError;
+    }
+
+    public async Task<CombatResult> KillAsync(IBattleNpc target, CancellationToken cancellationToken)
+    {
+        if (activeProvider == ActiveCombatProvider.None)
+        {
+            if (PrepareForSession() is { Length: > 0 } prepareError)
+                return new(false, prepareError);
+        }
+
+        return activeProvider == ActiveCombatProvider.WrathCombo
+            ? await KillWithWrathAsync(target, cancellationToken)
+            : await KillWithBossModAsync(target, cancellationToken);
+    }
+
+    public void EndSession()
+    {
+        var lease = wrathLease;
+        wrathLease = null;
+        activeProvider = ActiveCombatProvider.None;
+        if (lease is not null)
+            ReleaseWrathLease(lease.Value);
+    }
+
+    private string? PrepareBossModForSession()
+    {
         var requestedPreset = configuration.BossModPresetName.Trim();
         if (!string.IsNullOrWhiteSpace(requestedPreset))
         {
             preparedClassJobId = 0;
-            return SafeGetPreset(requestedPreset) is null
+            return SafeBossGetPreset(requestedPreset) is null
                 ? $"BossModReborn autorotation preset '{requestedPreset}' was not found."
                 : null;
         }
@@ -112,19 +192,19 @@ public sealed class CombatProvider : ICombatProvider
             return $"LootHunter does not have a BossModReborn rotation mapping for class/job ID {classJobId}. Set a BossModReborn preset explicitly in LootHunter settings.";
 
         // Avoid rewriting BossMod's user preset database on every kill in the same job.
-        if (preparedClassJobId == classJobId && SafeGetPreset(LootHunterPresetName) is not null)
+        if (preparedClassJobId == classJobId && SafeBossGetPreset(LootHunterPresetName) is not null)
             return null;
 
         try
         {
             var lootHunterPreset = BuildLootHunterPreset(classJobId, moduleType);
-            if (!createPreset.InvokeFunc(lootHunterPreset, true))
+            if (!bossCreatePreset.InvokeFunc(lootHunterPreset, true))
             {
                 preparedClassJobId = 0;
                 return $"BossModReborn rejected LootHunter's combat preset for class/job ID {classJobId}. Set a BossModReborn preset explicitly in LootHunter settings.";
             }
 
-            if (SafeGetPreset(LootHunterPresetName) is null)
+            if (SafeBossGetPreset(LootHunterPresetName) is null)
             {
                 preparedClassJobId = 0;
                 return "BossModReborn created the LootHunter combat preset but did not expose it afterward.";
@@ -140,19 +220,47 @@ public sealed class CombatProvider : ICombatProvider
         }
     }
 
-    public async Task<CombatResult> KillAsync(IBattleNpc target, CancellationToken cancellationToken)
+    private async Task<CombatResult> KillWithWrathAsync(IBattleNpc target, CancellationToken cancellationToken)
     {
-        if (PrepareForSession() is { Length: > 0 } prepareError)
+        if (target.CurrentHp == 0)
+            return new(true);
+
+        if (wrathLease is null)
+            return new(false, "LootHunter's WrathCombo autorotation lease is no longer active.");
+
+        targetManager.Target = target;
+        if (!await WaitForWrathJobReadyAsync(cancellationToken))
+            return new(false, "WrathCombo did not finish preparing the current job for autorotation.");
+
+        var deadline = DateTime.UtcNow.AddSeconds(Math.Max(15, configuration.CombatTimeoutSeconds));
+        while (DateTime.UtcNow < deadline)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (target.CurrentHp == 0)
+                return new(true);
+
+            if (targetManager.Target?.GameObjectId != target.GameObjectId)
+                targetManager.Target = target;
+
+            await Task.Delay(100, cancellationToken);
+        }
+
+        return new(false, $"Combat timed out after {configuration.CombatTimeoutSeconds} seconds.");
+    }
+
+    private async Task<CombatResult> KillWithBossModAsync(IBattleNpc target, CancellationToken cancellationToken)
+    {
+        if (PrepareBossModForSession() is { Length: > 0 } prepareError)
             return new(false, prepareError);
         if (target.CurrentHp == 0)
             return new(true);
 
-        var originalPreset = SafeGetActivePreset();
+        var originalPreset = SafeBossGetActivePreset();
         var configuredPreset = configuration.BossModPresetName.Trim();
         var requestedPreset = string.IsNullOrWhiteSpace(configuredPreset) ? LootHunterPresetName : configuredPreset;
         var changedPreset = !string.Equals(originalPreset, requestedPreset, StringComparison.OrdinalIgnoreCase);
 
-        if (changedPreset && !setActivePreset.InvokeFunc(requestedPreset))
+        if (changedPreset && !bossSetActivePreset.InvokeFunc(requestedPreset))
             return new(false, $"BossModReborn could not activate autorotation preset '{requestedPreset}'.");
 
         try
@@ -184,9 +292,9 @@ public sealed class CombatProvider : ICombatProvider
                 try
                 {
                     if (!string.IsNullOrWhiteSpace(originalPreset))
-                        setActivePreset.InvokeFunc(originalPreset);
+                        bossSetActivePreset.InvokeFunc(originalPreset);
                     else
-                        clearActivePreset.InvokeFunc();
+                        bossClearActivePreset.InvokeFunc();
                 }
                 catch
                 {
@@ -196,16 +304,118 @@ public sealed class CombatProvider : ICombatProvider
         }
     }
 
-    private string? SafeGetPreset(string name)
+    private Guid? PrepareWrathForSession()
     {
-        try { return getPreset.HasFunction ? getPreset.InvokeFunc(name) : null; }
+        Guid? lease = null;
+        try
+        {
+            lease = wrathRegisterForLease.InvokeFunc(InternalPluginName, PluginName);
+            if (lease is null)
+                return null;
+
+            if (!IsSuccessful(wrathSetAutoRotationState.InvokeFunc(lease.Value, true)))
+            {
+                ReleaseWrathLease(lease.Value);
+                return null;
+            }
+            if (!IsSuccessful(wrathSetCurrentJobAutoRotationReady.InvokeFunc(lease.Value)))
+            {
+                ReleaseWrathLease(lease.Value);
+                return null;
+            }
+
+            if (!SetWrathConfig(lease.Value, WrathAutoRotationConfigOption.InCombatOnly, false)
+                || !SetWrathConfig(lease.Value, WrathAutoRotationConfigOption.OnlyAttackInCombat, false)
+                || !SetWrathConfig(lease.Value, WrathAutoRotationConfigOption.DpsAlwaysHardTarget, true)
+                || !SetWrathConfig(lease.Value, WrathAutoRotationConfigOption.HealerAlwaysHardTarget, true))
+            {
+                ReleaseWrathLease(lease.Value);
+                return null;
+            }
+            return lease;
+        }
+        catch
+        {
+            if (lease is not null)
+                ReleaseWrathLease(lease.Value);
+            return null;
+        }
+    }
+
+    private async Task<bool> WaitForWrathJobReadyAsync(CancellationToken cancellationToken)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(15);
+        while (DateTime.UtcNow < deadline)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                if (wrathIsCurrentJobAutoRotationReady.InvokeFunc())
+                    return true;
+            }
+            catch
+            {
+                return false;
+            }
+
+            await Task.Delay(100, cancellationToken);
+        }
+
+        return false;
+    }
+
+    private bool SetWrathConfig(Guid lease, WrathAutoRotationConfigOption option, object value)
+    {
+        try { return IsSuccessful(wrathSetAutoRotationConfigState.InvokeFunc(lease, option, value)); }
+        catch { return false; }
+    }
+
+    private void ReleaseWrathLease(Guid lease)
+    {
+        try { wrathReleaseControl.InvokeAction(lease); }
+        catch { }
+    }
+
+    private bool SafeWrathIpcReady()
+    {
+        try { return wrathIpcReady.InvokeFunc(); }
+        catch { return false; }
+    }
+
+    private static bool IsSuccessful(WrathSetResult result)
+        => result is WrathSetResult.Okay or WrathSetResult.OkayWorking;
+
+    private string? SafeBossGetPreset(string name)
+    {
+        try { return bossGetPreset.HasFunction ? bossGetPreset.InvokeFunc(name) : null; }
         catch { return null; }
     }
 
-    private string? SafeGetActivePreset()
+    private string? SafeBossGetActivePreset()
     {
-        try { return getActivePreset.HasFunction ? getActivePreset.InvokeFunc() : null; }
+        try { return bossGetActivePreset.HasFunction ? bossGetActivePreset.InvokeFunc() : null; }
         catch { return null; }
+    }
+
+    private enum WrathSetResult
+    {
+        Okay = 0,
+        OkayWorking = 1,
+    }
+
+    private enum WrathAutoRotationConfigOption
+    {
+        InCombatOnly = 0,
+        OnlyAttackInCombat = 13,
+        DpsAlwaysHardTarget = 19,
+        HealerAlwaysHardTarget = 20,
+    }
+
+    private enum ActiveCombatProvider
+    {
+        None,
+        WrathCombo,
+        BossModReborn,
     }
 
     private static string BuildLootHunterPreset(uint classJobId, string moduleType)

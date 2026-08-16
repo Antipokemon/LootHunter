@@ -109,6 +109,7 @@ public sealed class FarmController
         pauseRequested = false;
         navigation.Stop();
         travel.Abort();
+        combat.EndSession();
         cancellation?.Cancel();
     }
 
@@ -191,6 +192,7 @@ public sealed class FarmController
         {
             navigation.Stop();
             travel.Abort();
+            combat.EndSession();
             pauseRequested = false;
         }
     }
@@ -380,17 +382,6 @@ public sealed class FarmController
                         continue;
                     }
 
-                    var player = objectTable.LocalPlayer;
-                    if (player is null)
-                        return false;
-
-                    var distance = Vector3.Distance(player.Position, snapped.Value);
-                    if (configuration.AutoMount && distance >= configuration.AutoMountMinimumDistance && !mount.IsMounted)
-                    {
-                        SetState(FarmState.Mounting, $"Mounting for {distance:F0} yalms of travel");
-                        await mount.MountAsync(token);
-                    }
-
                     var reachedSpawn = false;
                     while (!reachedSpawn && TargetStillUseful(target))
                     {
@@ -408,6 +399,7 @@ public sealed class FarmController
                             continue;
                         }
 
+                        await MountForTravelIfNeededAsync(snapped.Value, token);
                         SetState(FarmState.Navigating,
                             $"Moving through {target.MobName} spawn cluster {cluster.AreaIndex}/{target.Clusters.Count}; scanning en route");
                         var fly = configuration.UseFlight && mount.IsMounted && mount.CanFly;
@@ -524,6 +516,20 @@ public sealed class FarmController
         else
             await DelayWithPauseAsync(TimeSpan.FromSeconds(Math.Max(1, configuration.RespawnWaitSeconds)), token);
         return true;
+    }
+
+    private async Task MountForTravelIfNeededAsync(Vector3 destination, CancellationToken token)
+    {
+        var player = objectTable.LocalPlayer;
+        if (!configuration.AutoMount || mount.IsMounted || player is null)
+            return;
+
+        var distance = Vector3.Distance(player.Position, destination);
+        if (distance < configuration.AutoMountMinimumDistance)
+            return;
+
+        SetState(FarmState.Mounting, $"Mounting for {distance:F0} yalms of travel");
+        await mount.MountAsync(token);
     }
 
     private async Task<bool> KillAndRecordAsync(FarmTarget farmTarget, IBattleNpc battleNpc, CancellationToken token)
