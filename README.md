@@ -80,6 +80,16 @@ LootHunter/
 └── LootHunter.csproj
 ```
 
+## Custom plugin repository
+
+`repo.json` is included at the repository root for use as a Dalamud custom plugin repository. Once the GitHub repository and first release exist, add this URL under **Dalamud Settings → Experimental → Custom Plugin Repositories**:
+
+```text
+https://raw.githubusercontent.com/Antipokemon/LootHunter/main/repo.json
+```
+
+The release must contain an asset named `LootHunter.zip`. The manifest download links use GitHub's `releases/latest/download/LootHunter.zip` endpoint, so the URLs do not need to change for each release. Bump `AssemblyVersion` (and `TestingAssemblyVersion` when used) in `repo.json` whenever publishing a new plugin version.
+
 ## Current limitations
 
 - BossModReborn is the first combat provider. The interface is intentionally isolated so another provider can be added later without changing the planner/state machine.

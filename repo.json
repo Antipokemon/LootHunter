@@ -1,0 +1,26 @@
+[
+  {
+    "Author": "Antipokemon",
+    "Name": "LootHunter",
+    "Punchline": "Autonomous ordinary monster-drop farming.",
+    "Description": "Create loot lists with target quantities, resolve monster spawns, validate level safety, teleport, mount, navigate, fight, and continue until the list is complete.",
+    "InternalName": "LootHunter",
+    "AssemblyVersion": "0.1.0.0",
+    "TestingAssemblyVersion": "0.1.0.0",
+    "RepoUrl": "https://github.com/Antipokemon/LootHunter",
+    "ApplicableVersion": "any",
+    "DalamudApiLevel": 15,
+    "TestingDalamudApiLevel": 15,
+    "DownloadLinkInstall": "https://github.com/Antipokemon/LootHunter/releases/latest/download/LootHunter.zip",
+    "DownloadLinkUpdate": "https://github.com/Antipokemon/LootHunter/releases/latest/download/LootHunter.zip",
+    "DownloadLinkTesting": "https://github.com/Antipokemon/LootHunter/releases/latest/download/LootHunter.zip",
+    "Tags": [
+      "loot",
+      "farming",
+      "monster",
+      "automation"
+    ],
+    "IsHide": false,
+    "IsTestingExclusive": false
+  }
+]
