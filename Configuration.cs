@@ -3,6 +3,15 @@ using LootHunter.Models;
 
 namespace LootHunter;
 
+public enum CompletionTeleportDestination
+{
+    ResidentialDistrict,
+    FreeCompanyEstate,
+    Apartment,
+    Inn,
+    Custom,
+}
+
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
@@ -13,6 +22,9 @@ public sealed class Configuration : IPluginConfiguration
     public bool UseFlight { get; set; } = false;
     public float CombatApproachDistance { get; set; } = 3.5f;
     public float MobScanRadius { get; set; } = 90f;
+    public bool TeleportOnCompletion { get; set; } = true;
+    public CompletionTeleportDestination CompletionTeleportDestination { get; set; } = CompletionTeleportDestination.ResidentialDistrict;
+    public string CompletionTeleportCustomCommand { get; set; } = string.Empty;
 
     public int MinimumLevelDifference { get; set; } = 0;
     public bool SkipUnsafeTargets { get; set; } = true;
@@ -31,6 +43,30 @@ public sealed class Configuration : IPluginConfiguration
     public string BossModPresetName { get; set; } = string.Empty;
 
     public List<LootList> LootLists { get; set; } = [];
+
+    public string GetCompletionTeleportCommand()
+        => CompletionTeleportDestination switch
+        {
+            CompletionTeleportDestination.ResidentialDistrict => "auto",
+            CompletionTeleportDestination.FreeCompanyEstate => "fc",
+            CompletionTeleportDestination.Apartment => "apartment",
+            CompletionTeleportDestination.Inn => "inn",
+            CompletionTeleportDestination.Custom => CompletionTeleportCustomCommand.Trim(),
+            _ => "auto",
+        };
+
+    public string GetCompletionTeleportLabel()
+        => CompletionTeleportDestination switch
+        {
+            CompletionTeleportDestination.ResidentialDistrict => "residential district",
+            CompletionTeleportDestination.FreeCompanyEstate => "Free Company estate",
+            CompletionTeleportDestination.Apartment => "apartment",
+            CompletionTeleportDestination.Inn => "inn room",
+            CompletionTeleportDestination.Custom => string.IsNullOrWhiteSpace(CompletionTeleportCustomCommand)
+                ? "custom destination"
+                : CompletionTeleportCustomCommand.Trim(),
+            _ => "residential district",
+        };
 
     public void Save() => Plugin.PluginInterface.SavePluginConfig(this);
 }

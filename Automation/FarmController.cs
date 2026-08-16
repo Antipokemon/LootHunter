@@ -37,6 +37,7 @@ public sealed class FarmController
     private readonly Dictionary<uint, uint> goals = [];
     private readonly HashSet<MobSourceKey> excludedSources = [];
     private readonly Dictionary<MobSourceKey, int> navigationFailures = [];
+    private LootList? activeList;
 
     public FarmController(
         Configuration configuration,
@@ -73,6 +74,28 @@ public sealed class FarmController
     }
 
     public FarmSession Session => session;
+    public Guid? ActiveListId => session.IsRunning ? activeList?.Id : null;
+    public bool RequiredPluginsAvailable => travel.IsAvailable && navigation.IsAvailable && combat.IsAvailable;
+    public IReadOnlyList<PluginRequirementStatus> PluginRequirements =>
+    [
+        new(
+            "Lifestream",
+            true,
+            travel.IsAvailable,
+            travel.IsAvailable ? "Ready for teleportation." : "Install and enable Lifestream."),
+        new(
+            "vnavmesh",
+            true,
+            navigation.IsAvailable,
+            navigation.IsAvailable ? "Ready for pathfinding and movement." : "Install and enable vnavmesh."),
+        new(
+            "Combat rotation",
+            true,
+            combat.IsAvailable,
+            combat.IsAvailable
+                ? $"{combat.Name} is ready."
+                : combat.AvailabilityError ?? "Install and enable Wrath Combo or BossModReborn."),
+    ];
 
     public Task StartAsync(LootList list)
     {
@@ -85,10 +108,11 @@ public sealed class FarmController
         pauseRequested = false;
         cancellation?.Dispose();
         cancellation = new CancellationTokenSource();
+        activeList = list;
         // Run the full automation coroutine through Dalamud's framework scheduler.
         // IObjectTable, ITargetManager, IAetheryteList and several game-state APIs are
         // main-thread-only, and IFramework.Run keeps async continuations on that thread.
-        runTask = framework.Run(() => RunAsync(CloneList(list), cancellation.Token), cancellation.Token);
+        runTask = framework.Run(() => RunAsync(list, cancellation.Token), cancellation.Token);
         return runTask;
     }
 
@@ -129,7 +153,7 @@ public sealed class FarmController
 
             if (CalculateRequiredQuantities().Count == 0)
             {
-                SetState(FarmState.Completed, "Loot list is already complete");
+                await CompleteAsync("Loot list is already complete", token);
                 return;
             }
 
@@ -142,9 +166,11 @@ public sealed class FarmController
                 UpdateProgress();
                 if (required.Count == 0)
                 {
-                    SetState(FarmState.Completed, "Loot list complete");
+                    await CompleteAsync("Loot list complete", token);
                     return;
                 }
+
+                await EnsureRequiredSourcesReadyAsync(required.Keys, token);
 
                 SetState(FarmState.Planning, "Building the next farm route");
                 var plan = planner.BuildPlan(list, required, clientState.TerritoryType, excludedSources);
@@ -169,7 +195,7 @@ public sealed class FarmController
                     UpdateProgress();
                     if (required.Count == 0)
                     {
-                        SetState(FarmState.Completed, "Loot list complete");
+                        await CompleteAsync("Loot list complete", token);
                         return;
                     }
 
@@ -199,7 +225,53 @@ public sealed class FarmController
             travel.Abort();
             combat.EndSession();
             pauseRequested = false;
+            activeList = null;
         }
+    }
+
+    private async Task CompleteAsync(string completionMessage, CancellationToken token)
+    {
+        navigation.Stop();
+        combat.EndSession();
+
+        if (!configuration.TeleportOnCompletion)
+        {
+            SetState(FarmState.Completed, completionMessage);
+            return;
+        }
+
+        var command = configuration.GetCompletionTeleportCommand();
+        var label = configuration.GetCompletionTeleportLabel();
+        if (string.IsNullOrWhiteSpace(command))
+        {
+            session.AddWarning("Completion teleport is set to Custom, but no Lifestream destination was entered.");
+            SetState(FarmState.Completed, completionMessage);
+            return;
+        }
+
+        SetState(FarmState.Teleporting, $"Returning to {label}");
+        if (await travel.TeleportByLifestreamCommandAsync(command, token))
+            SetState(FarmState.Completed, $"{completionMessage}; returned to {label}");
+        else
+        {
+            session.AddWarning($"The loot list completed, but Lifestream could not travel to {label}.");
+            SetState(FarmState.Completed, completionMessage);
+        }
+    }
+
+    private async Task EnsureRequiredSourcesReadyAsync(IEnumerable<uint> requiredItemIds, CancellationToken token)
+    {
+        var itemIds = requiredItemIds.Distinct().ToList();
+        var unresolved = itemIds.Where(itemId => database.GetSourcesForItem(itemId).Count == 0).ToList();
+        if (unresolved.Count > 0)
+        {
+            SetState(FarmState.Validating, unresolved.Count == 1
+                ? $"Looking up monster location for {database.GetItemName(unresolved[0])}"
+                : $"Looking up monster locations for {unresolved.Count} newly added items");
+            await database.EnsureSourcesResolvedAsync(unresolved, token);
+        }
+
+        database.RefreshTravelDestinations(itemIds);
     }
 
     private async Task ValidatePreflightAsync(LootList list, CancellationToken token)
@@ -276,12 +348,27 @@ public sealed class FarmController
         sessionStartCounts.Clear();
         goals.Clear();
 
-        foreach (var entry in list.Items.Where(x => x.Enabled && x.ItemId != 0 && x.Quantity > 0))
+        SyncGoals(list);
+    }
+
+    private void SyncGoals(LootList list)
+    {
+        var entries = list.Items
+            .Where(x => x.Enabled && x.ItemId != 0 && x.Quantity > 0)
+            .GroupBy(x => x.ItemId)
+            .Select(x => x.Last())
+            .ToList();
+        var activeItemIds = entries.Select(x => x.ItemId).ToHashSet();
+
+        foreach (var removedItemId in goals.Keys.Where(x => !activeItemIds.Contains(x)).ToList())
+            goals.Remove(removedItemId);
+
+        foreach (var entry in entries)
         {
             var current = inventory.GetItemCount(entry.ItemId);
-            sessionStartCounts[entry.ItemId] = current;
+            sessionStartCounts.TryAdd(entry.ItemId, current);
             goals[entry.ItemId] = list.QuantityMode == QuantityMode.GatherAdditional
-                ? SaturatingAdd(current, entry.Quantity)
+                ? SaturatingAdd(sessionStartCounts[entry.ItemId], entry.Quantity)
                 : entry.Quantity;
         }
     }
@@ -888,6 +975,9 @@ public sealed class FarmController
 
     private Dictionary<uint, uint> CalculateRequiredQuantities()
     {
+        if (activeList is not null)
+            SyncGoals(activeList);
+
         var result = new Dictionary<uint, uint>();
         foreach (var (itemId, goal) in goals)
         {
@@ -900,6 +990,9 @@ public sealed class FarmController
 
     private void UpdateProgress()
     {
+        if (activeList is not null)
+            SyncGoals(activeList);
+
         session.SetProgress(goals
             .Select(x =>
             {
@@ -974,20 +1067,4 @@ public sealed class FarmController
     private static uint SaturatingAdd(uint left, uint right)
         => uint.MaxValue - left < right ? uint.MaxValue : left + right;
 
-    private static LootList CloneList(LootList source)
-        => new()
-        {
-            Id = source.Id,
-            Name = source.Name,
-            Enabled = source.Enabled,
-            QuantityMode = source.QuantityMode,
-            Items = source.Items.Select(x => new LootListEntry
-            {
-                ItemId = x.ItemId,
-                Quantity = x.Quantity,
-                Enabled = x.Enabled,
-                PreferredBNpcNameId = x.PreferredBNpcNameId,
-                PreferredTerritoryId = x.PreferredTerritoryId,
-            }).ToList(),
-        };
 }

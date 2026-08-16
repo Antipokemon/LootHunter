@@ -28,6 +28,8 @@ public sealed class MainWindow : Window
     {
         DrawHeader();
         ImGui.Separator();
+        DrawRequirements();
+        ImGui.Separator();
 
         var list = GetSelectedList();
         if (list is null)
@@ -75,7 +77,7 @@ public sealed class MainWindow : Window
         }
 
         ImGui.SameLine();
-        ImGui.BeginDisabled(selected is null || plugin.FarmController.Session.IsRunning);
+        ImGui.BeginDisabled(selected is null || selected.Id == plugin.FarmController.ActiveListId);
         if (ImGui.Button("Delete list") && selected is not null)
         {
             var deletedId = selected.Id;
@@ -103,6 +105,7 @@ public sealed class MainWindow : Window
 
         var modeLabel = list.QuantityMode == QuantityMode.TargetInventory ? "Target inventory total" : "Gather additional";
         ImGui.SetNextItemWidth(220f);
+        ImGui.BeginDisabled(list.Id == plugin.FarmController.ActiveListId);
         if (ImGui.BeginCombo("Quantity mode", modeLabel))
         {
             if (ImGui.Selectable("Target inventory total", list.QuantityMode == QuantityMode.TargetInventory))
@@ -117,6 +120,7 @@ public sealed class MainWindow : Window
             }
             ImGui.EndCombo();
         }
+        ImGui.EndDisabled();
         ImGui.SameLine();
         ImGui.TextDisabled(list.QuantityMode == QuantityMode.TargetInventory
             ? "Stop when inventory reaches the requested total."
@@ -147,8 +151,6 @@ public sealed class MainWindow : Window
             return;
         }
 
-        var sessionRunning = plugin.FarmController.Session.IsRunning;
-        ImGui.BeginDisabled(sessionRunning);
         ImGui.SetNextItemWidth(420f);
         if (ImGui.BeginCombo("##MonsterDropPicker", "Select monster drop..."))
         {
@@ -206,10 +208,9 @@ public sealed class MainWindow : Window
 
             ImGui.EndCombo();
         }
-        ImGui.EndDisabled();
 
-        if (sessionRunning)
-            ImGui.TextDisabled("Item selection is locked while farming is active.");
+        if (list.Id == plugin.FarmController.ActiveListId)
+            ImGui.TextDisabled("Changes to this list are applied to the active farming run.");
     }
 
     private void DrawItems(LootList list)
@@ -239,13 +240,11 @@ public sealed class MainWindow : Window
 
                 ImGui.TableSetColumnIndex(0);
                 var enabled = entry.Enabled;
-                ImGui.BeginDisabled(plugin.FarmController.Session.IsRunning);
                 if (ImGui.Checkbox("##Enabled", ref enabled))
                 {
                     entry.Enabled = enabled;
                     plugin.LootLists.Save();
                 }
-                ImGui.EndDisabled();
 
                 ImGui.TableSetColumnIndex(1);
                 ImGui.TextUnformatted(plugin.MobDatabase.GetItemName(entry.ItemId));
@@ -254,13 +253,11 @@ public sealed class MainWindow : Window
                 ImGui.TableSetColumnIndex(2);
                 var quantity = entry.Quantity > int.MaxValue ? int.MaxValue : (int)entry.Quantity;
                 ImGui.SetNextItemWidth(90f);
-                ImGui.BeginDisabled(plugin.FarmController.Session.IsRunning);
                 if (ImGui.InputInt("##Qty", ref quantity, 1, 10))
                 {
                     entry.Quantity = (uint)Math.Max(1, quantity);
                     plugin.LootLists.Save();
                 }
-                ImGui.EndDisabled();
 
                 ImGui.TableSetColumnIndex(3);
                 var inventoryCount = plugin.Inventory.GetItemCount(entry.ItemId);
@@ -285,10 +282,8 @@ public sealed class MainWindow : Window
                 }
 
                 ImGui.TableSetColumnIndex(5);
-                ImGui.BeginDisabled(plugin.FarmController.Session.IsRunning);
                 if (ImGui.SmallButton("Remove"))
                     removeItemId = entry.ItemId;
-                ImGui.EndDisabled();
 
                 ImGui.PopID();
             }
@@ -305,7 +300,11 @@ public sealed class MainWindow : Window
         var session = plugin.FarmController.Session;
         ImGui.TextUnformatted("Automation");
 
-        ImGui.BeginDisabled(session.IsRunning || !plugin.MobDatabase.IsReady || list.Items.All(x => !x.Enabled));
+        ImGui.BeginDisabled(
+            session.IsRunning
+            || !plugin.FarmController.RequiredPluginsAvailable
+            || !plugin.MobDatabase.IsReady
+            || list.Items.All(x => !x.Enabled));
         if (ImGui.Button("Start farming", new Vector2(120f, 0f)))
             _ = plugin.FarmController.StartAsync(list);
         ImGui.EndDisabled();
@@ -367,6 +366,39 @@ public sealed class MainWindow : Window
             ImGui.Spacing();
             ImGui.TextWrapped($"Error: {session.LastError.Message}");
         }
+    }
+
+    private void DrawRequirements()
+    {
+        if (!ImGui.CollapsingHeader("Requirements", ImGuiTreeNodeFlags.DefaultOpen))
+            return;
+
+        if (!ImGui.BeginTable("PluginRequirements", 3, ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp))
+            return;
+
+        ImGui.TableSetupColumn("Status", ImGuiTableColumnFlags.WidthFixed, 70f);
+        ImGui.TableSetupColumn("Plugin", ImGuiTableColumnFlags.WidthFixed, 145f);
+        ImGui.TableSetupColumn("Details");
+        ImGui.TableHeadersRow();
+
+        foreach (var requirement in plugin.FarmController.PluginRequirements)
+        {
+            ImGui.TableNextRow();
+            ImGui.TableSetColumnIndex(0);
+            ImGui.TextColored(
+                requirement.Available ? new Vector4(0.35f, 0.85f, 0.45f, 1f) : new Vector4(0.95f, 0.35f, 0.35f, 1f),
+                requirement.Available ? "Ready" : "Missing");
+
+            ImGui.TableSetColumnIndex(1);
+            ImGui.TextUnformatted(requirement.Name);
+            if (requirement.Mandatory)
+                ImGui.TextDisabled("Required");
+
+            ImGui.TableSetColumnIndex(2);
+            ImGui.TextWrapped(requirement.Detail);
+        }
+
+        ImGui.EndTable();
     }
 
     private LootList? GetSelectedList()

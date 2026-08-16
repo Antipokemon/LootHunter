@@ -45,6 +45,7 @@ public interface ITravelService
     bool IsAvailable { get; }
     bool IsBusy { get; }
     Task<bool> TeleportNearAsync(FarmTarget target, CancellationToken cancellationToken);
+    Task<bool> TeleportByLifestreamCommandAsync(string command, CancellationToken cancellationToken);
     void Abort();
 }
 
@@ -106,3 +107,5 @@ public interface ICombatProvider
 }
 
 public sealed record CombatResult(bool Success, string? Error = null);
+
+public sealed record PluginRequirementStatus(string Name, bool Mandatory, bool Available, string Detail);

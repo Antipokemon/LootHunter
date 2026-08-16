@@ -13,7 +13,7 @@ public sealed class ConfigWindow : Window
         this.plugin = plugin;
         SizeConstraints = new WindowSizeConstraints
         {
-            MinimumSize = new Vector2(480, 420),
+            MinimumSize = new Vector2(520, 500),
             MaximumSize = new Vector2(float.MaxValue, float.MaxValue),
         };
     }
@@ -46,6 +46,47 @@ public sealed class ConfigWindow : Window
             changed = true;
         }
         ImGui.TextDisabled("Flight is attempted only after mounting; disable this if you prefer ground routes.");
+
+        var teleportOnCompletion = config.TeleportOnCompletion;
+        if (ImGui.Checkbox("Teleport when the loot list is complete", ref teleportOnCompletion))
+        {
+            config.TeleportOnCompletion = teleportOnCompletion;
+            changed = true;
+        }
+
+        ImGui.BeginDisabled(!teleportOnCompletion);
+        var completionDestination = config.CompletionTeleportDestination;
+        ImGui.SetNextItemWidth(220f);
+        if (ImGui.BeginCombo("Completion destination", GetCompletionDestinationName(completionDestination)))
+        {
+            foreach (var destination in Enum.GetValues<CompletionTeleportDestination>())
+            {
+                if (ImGui.Selectable(GetCompletionDestinationName(destination), completionDestination == destination))
+                {
+                    config.CompletionTeleportDestination = destination;
+                    completionDestination = destination;
+                    changed = true;
+                }
+            }
+            ImGui.EndCombo();
+        }
+
+        if (completionDestination == CompletionTeleportDestination.Custom)
+        {
+            var command = config.CompletionTeleportCustomCommand;
+            ImGui.SetNextItemWidth(300f);
+            if (ImGui.InputText("Lifestream destination", ref command, 120))
+            {
+                config.CompletionTeleportCustomCommand = command;
+                changed = true;
+            }
+            ImGui.TextDisabled("Enter Lifestream command arguments, such as Limsa Lominsa or /li Limsa Lominsa.");
+        }
+        else
+        {
+            ImGui.TextDisabled("The default uses Lifestream's configured automatic property priority.");
+        }
+        ImGui.EndDisabled();
 
         ImGui.Separator();
         ImGui.TextUnformatted("Combat and safety");
@@ -171,4 +212,15 @@ public sealed class ConfigWindow : Window
         if (changed)
             config.Save();
     }
+
+    private static string GetCompletionDestinationName(CompletionTeleportDestination destination)
+        => destination switch
+        {
+            CompletionTeleportDestination.ResidentialDistrict => "Residential district (automatic, default)",
+            CompletionTeleportDestination.FreeCompanyEstate => "Free Company estate",
+            CompletionTeleportDestination.Apartment => "Apartment",
+            CompletionTeleportDestination.Inn => "Inn room",
+            CompletionTeleportDestination.Custom => "Custom Lifestream location",
+            _ => destination.ToString(),
+        };
 }
