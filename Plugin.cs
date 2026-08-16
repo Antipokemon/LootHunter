@@ -52,7 +52,7 @@ public sealed class Plugin : IDalamudPlugin
         var navigation = new NavigationService(PluginInterface, ObjectTable, Configuration);
         var targetService = new TargetService(ObjectTable, TargetManager);
         var mount = new MountService(ObjectTable, Log);
-        var combat = new CombatProvider(PluginInterface, TargetManager, Configuration);
+        var combat = new CombatProvider(PluginInterface, TargetManager, PlayerState, Configuration);
 
         FarmController = new FarmController(
             Configuration,

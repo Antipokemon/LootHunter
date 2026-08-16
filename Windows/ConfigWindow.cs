@@ -90,7 +90,7 @@ public sealed class ConfigWindow : Window
             config.BossModPresetName = preset.Trim();
             changed = true;
         }
-        ImGui.TextDisabled("Leave blank to let LootHunter create and manage its own BossModReborn overworld combat preset.");
+        ImGui.TextDisabled("Leave blank to let LootHunter create a job-specific BossModReborn combat preset with manual targeting.");
 
         ImGui.Separator();
         ImGui.TextUnformatted("Spawn and recovery behavior");
