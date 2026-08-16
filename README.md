@@ -12,7 +12,7 @@ Required capability plugins for the first version:
 - **vnavmesh** — local pathfinding and movement
 - **BossModReborn** — combat autorotation
 
-LootHunter loads structured monster-drop and spawn data directly from the `LuminaSupplemental.Excel` NuGet package. GatherBuddyReborn was useful as a reference for how that dataset can be consumed, but it is not a runtime dependency. MonsterLootHunter is also not required at runtime; LootHunter now implements the same on-demand Console Games Wiki fallback strategy for items whose structured LuminaSupplemental source/location data is missing or incomplete.
+LootHunter loads structured monster-drop and spawn data directly from the `LuminaSupplemental.Excel` NuGet package. GatherBuddyReborn was useful as a reference for how that dataset can be consumed, but it is not a runtime dependency. MonsterLootHunter is also not required at runtime; its data model was evaluated during design, while the structured LuminaSupplemental dataset is the primary source in this version.
 
 ## Current workflow
 
