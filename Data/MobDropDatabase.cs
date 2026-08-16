@@ -52,13 +52,13 @@ public sealed class MobDropDatabase : IMobDropDatabase, IDisposable
 
         try
         {
-            await framework.Run(Load);
+            await Task.Run(Load);
         }
         catch (Exception ex)
         {
             LoadError = ex.Message;
             IsReady = false;
-            log.Error(ex, "LootHunter failed to initialize the monster-drop database on the framework thread.");
+            log.Error(ex, "LootHunter failed to initialize the monster-drop database.");
         }
         finally
         {
@@ -328,8 +328,6 @@ public sealed class MobDropDatabase : IMobDropDatabase, IDisposable
 
                         var territoryName = territory.PlaceName.ValueNullable?.Name.ExtractText() ?? $"Territory {territoryId}";
                         var clusters = BuildClusters(points);
-                        var aetheryte = SelectAetheryte(territoryId, clusters);
-
                         source = new MobSource
                         {
                             BNpcNameId = drop.BNpcNameId,
@@ -337,7 +335,7 @@ public sealed class MobDropDatabase : IMobDropDatabase, IDisposable
                             TerritoryId = territoryId,
                             TerritoryName = territoryName,
                             MobLevel = null,
-                            NearestAetheryte = aetheryte,
+                            NearestAetheryte = null,
                             Clusters = clusters,
                             DropItemIds = dropItemsByNpc.GetValueOrDefault(drop.BNpcNameId) ?? new HashSet<uint>(),
                         };
