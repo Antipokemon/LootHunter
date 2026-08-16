@@ -136,7 +136,10 @@ public sealed class MainWindow : Window
 
         if (!plugin.MobDatabase.IsReady)
         {
-            ImGui.TextWrapped($"Monster-drop database unavailable: {plugin.MobDatabase.LoadError ?? "not ready"}");
+            if (plugin.MobDatabase.IsLoading)
+                ImGui.TextDisabled("Loading monster-drop database...");
+            else
+                ImGui.TextWrapped($"Monster-drop database unavailable: {plugin.MobDatabase.LoadError ?? "not ready"}");
             return;
         }
 
@@ -242,7 +245,7 @@ public sealed class MainWindow : Window
         var session = plugin.FarmController.Session;
         ImGui.TextUnformatted("Automation");
 
-        ImGui.BeginDisabled(session.IsRunning || list.Items.All(x => !x.Enabled));
+        ImGui.BeginDisabled(session.IsRunning || !plugin.MobDatabase.IsReady || list.Items.All(x => !x.Enabled));
         if (ImGui.Button("Start farming", new Vector2(120f, 0f)))
             _ = plugin.FarmController.StartAsync(list);
         ImGui.EndDisabled();

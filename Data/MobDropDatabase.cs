@@ -21,6 +21,7 @@ public sealed class MobDropDatabase : IMobDropDatabase
     private readonly Dictionary<uint, string> itemNames = [];
 
     public bool IsReady { get; private set; }
+    public bool IsLoading { get; private set; }
     public string? LoadError { get; private set; }
 
     public MobDropDatabase(IDataManager dataManager, IAetheryteList aetherytes, IPluginLog log)
@@ -28,7 +29,33 @@ public sealed class MobDropDatabase : IMobDropDatabase
         this.dataManager = dataManager;
         this.aetherytes = aetherytes;
         this.log = log;
-        Load();
+    }
+
+    public async Task InitializeAsync(IFramework framework)
+    {
+        if (IsReady || IsLoading)
+            return;
+
+        IsLoading = true;
+        LoadError = null;
+
+        try
+        {
+            // IDataManager sheet access and IAetheryteList enumeration must run on
+            // Dalamud's framework thread. Plugin construction itself is not guaranteed
+            // to run there.
+            await framework.Run(Load);
+        }
+        catch (Exception ex)
+        {
+            LoadError = ex.Message;
+            IsReady = false;
+            log.Error(ex, "LootHunter failed to initialize the monster-drop database on the framework thread.");
+        }
+        finally
+        {
+            IsLoading = false;
+        }
     }
 
     public IReadOnlyList<MobSource> GetSourcesForItem(uint itemId)

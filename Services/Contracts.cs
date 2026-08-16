@@ -7,6 +7,7 @@ namespace LootHunter.Services;
 public interface IMobDropDatabase
 {
     bool IsReady { get; }
+    bool IsLoading { get; }
     string? LoadError { get; }
     IReadOnlyList<MobSource> GetSourcesForItem(uint itemId);
     IReadOnlyList<ItemSearchResult> SearchDropItems(string query, int limit = 30);

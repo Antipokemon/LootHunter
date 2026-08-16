@@ -25,6 +25,7 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IAetheryteList AetheryteList { get; private set; } = null!;
     [PluginService] internal static IDutyState DutyState { get; private set; } = null!;
     [PluginService] internal static IPluginLog Log { get; private set; } = null!;
+    [PluginService] internal static IFramework Framework { get; private set; } = null!;
 
     public Configuration Configuration { get; }
     public LootListService LootLists { get; }
@@ -40,6 +41,7 @@ public sealed class Plugin : IDalamudPlugin
         Configuration = PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
         LootLists = new LootListService(Configuration);
         MobDatabase = new MobDropDatabase(DataManager, AetheryteList, Log);
+        _ = MobDatabase.InitializeAsync(Framework);
 
         var inventory = new InventoryService();
         var planner = new RoutePlanner(MobDatabase);
@@ -64,6 +66,7 @@ public sealed class Plugin : IDalamudPlugin
             ClientState,
             ObjectTable,
             DutyState,
+            Framework,
             Log);
 
         mainWindow = new MainWindow(this);

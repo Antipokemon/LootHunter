@@ -21,6 +21,7 @@ public sealed class FarmController
     private readonly IClientState clientState;
     private readonly IObjectTable objectTable;
     private readonly IDutyState dutyState;
+    private readonly IFramework framework;
     private readonly IPluginLog log;
 
     private readonly FarmSession session = new();
@@ -45,6 +46,7 @@ public sealed class FarmController
         IClientState clientState,
         IObjectTable objectTable,
         IDutyState dutyState,
+        IFramework framework,
         IPluginLog log)
     {
         this.configuration = configuration;
@@ -60,6 +62,7 @@ public sealed class FarmController
         this.clientState = clientState;
         this.objectTable = objectTable;
         this.dutyState = dutyState;
+        this.framework = framework;
         this.log = log;
     }
 
@@ -75,7 +78,10 @@ public sealed class FarmController
         pauseRequested = false;
         cancellation?.Dispose();
         cancellation = new CancellationTokenSource();
-        runTask = RunAsync(CloneList(list), cancellation.Token);
+        // Run the full automation coroutine through Dalamud's framework scheduler.
+        // IObjectTable, ITargetManager, IAetheryteList and several game-state APIs are
+        // main-thread-only, and IFramework.Run keeps async continuations on that thread.
+        runTask = framework.Run(() => RunAsync(CloneList(list), cancellation.Token), cancellation.Token);
         return runTask;
     }
 
@@ -198,7 +204,9 @@ public sealed class FarmController
         if (!levelSafety.IsCombatJob(out var jobError))
             throw new InvalidOperationException(jobError);
         if (!database.IsReady)
-            throw new InvalidOperationException(database.LoadError ?? "Monster-drop data is not ready.");
+            throw new InvalidOperationException(database.IsLoading
+                ? "Monster-drop data is still loading. Try again in a moment."
+                : database.LoadError ?? "Monster-drop data is not ready.");
         database.RefreshTravelDestinations();
         if (!travel.IsAvailable)
             throw new InvalidOperationException("Lifestream IPC is unavailable. Install and enable Lifestream.");
