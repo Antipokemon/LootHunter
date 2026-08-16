@@ -66,7 +66,8 @@ public interface INavigationService
         float stopDistance,
         bool fly,
         CancellationToken cancellationToken,
-        Func<bool>? interruptRequested = null);
+        Func<bool>? interruptRequested = null,
+        float arrivalTolerance = 1.5f);
     Vector3? SnapToFloor(Vector3 destination);
     void Stop();
 }

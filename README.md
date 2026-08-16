@@ -34,7 +34,7 @@ LootHunter loads structured monster-drop and spawn data directly from the `Lumin
 9. Use vnavmesh to cycle known spawn locations.
 10. Find targets by `BNpcNameId`, not localized display names.
 11. Check the live monster level before combat.
-12. Dismount, select the target, and let WrathCombo autorotation handle combat actions. If WrathCombo IPC is unavailable, LootHunter falls back to BossModReborn.
+12. Dismount, select the target, maintain the configured combat range with vnavmesh, and let WrathCombo autorotation handle combat actions. If WrathCombo IPC is unavailable, LootHunter falls back to BossModReborn.
 13. Compare inventory before and after the kill so completion is based on actual drops rather than kill count.
 14. Re-plan immediately when requested quantities change.
 15. Continue until every enabled list entry is complete.
@@ -58,7 +58,7 @@ Unreachable or repeatedly failing sources are excluded for the current farm sess
 
 ## Combat behavior
 
-LootHunter prefers WrathCombo's lease-based IPC for combat. At farm start it registers a LootHunter lease, enables autorotation, marks the current job ready for autorotation, and waits for that asynchronous setup before engaging. The lease remains active across consecutive monsters and is released when the farm session ends. Movement remains under LootHunter/vnavmesh control.
+LootHunter prefers WrathCombo's lease-based IPC for combat. At farm start it registers a LootHunter lease and prepares the current job, but keeps autorotation disabled while traveling and approaching. Once vnavmesh has stopped inside the configured combat range, LootHunter selects the intended monster and enables autorotation for that fight. Autorotation is disabled again after the kill while the lease remains prepared for the next monster. The lease is released when the farm session ends. Movement remains under LootHunter/vnavmesh control, including re-approaching if the monster moves out of range during combat.
 
 If WrathCombo IPC is unavailable, LootHunter falls back to BossModReborn's public preset IPC. In that fallback path, if **BossMod preset name** is blank, LootHunter creates a small job-specific BossModReborn preset with manual targeting. If a preset name is configured, LootHunter temporarily activates it for combat and restores the previous preset afterward.
 

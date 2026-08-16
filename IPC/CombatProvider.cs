@@ -170,7 +170,10 @@ public sealed class CombatProvider : ICombatProvider
         wrathLease = null;
         activeProvider = ActiveCombatProvider.None;
         if (lease is not null)
+        {
+            SetWrathRotationEnabled(lease.Value, false);
             ReleaseWrathLease(lease.Value);
+        }
     }
 
     private string? PrepareBossModForSession()
@@ -225,27 +228,42 @@ public sealed class CombatProvider : ICombatProvider
         if (target.CurrentHp == 0)
             return new(true);
 
-        if (wrathLease is null)
+        if (wrathLease is not { } lease)
             return new(false, "LootHunter's WrathCombo autorotation lease is no longer active.");
 
         targetManager.Target = target;
         if (!await WaitForWrathJobReadyAsync(cancellationToken))
             return new(false, "WrathCombo did not finish preparing the current job for autorotation.");
+        cancellationToken.ThrowIfCancellationRequested();
+        if (wrathLease != lease)
+            return new(false, "LootHunter's WrathCombo autorotation lease ended before combat began.");
+        if (!SetWrathRotationEnabled(lease, true))
+            return new(false, "WrathCombo could not enable autorotation for combat.");
 
-        var deadline = DateTime.UtcNow.AddSeconds(Math.Max(15, configuration.CombatTimeoutSeconds));
-        while (DateTime.UtcNow < deadline)
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (target.CurrentHp == 0)
-                return new(true);
+            var deadline = DateTime.UtcNow.AddSeconds(Math.Max(15, configuration.CombatTimeoutSeconds));
+            while (DateTime.UtcNow < deadline)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (target.CurrentHp == 0)
+                    return new(true);
 
-            if (targetManager.Target?.GameObjectId != target.GameObjectId)
-                targetManager.Target = target;
+                if (targetManager.Target?.GameObjectId != target.GameObjectId)
+                    targetManager.Target = target;
 
-            await Task.Delay(100, cancellationToken);
+                await Task.Delay(100, cancellationToken);
+            }
+
+            return new(false, $"Combat timed out after {configuration.CombatTimeoutSeconds} seconds.");
         }
-
-        return new(false, $"Combat timed out after {configuration.CombatTimeoutSeconds} seconds.");
+        finally
+        {
+            // The lease remains prepared between kills, but autorotation must not run
+            // while LootHunter is traveling past other monsters or approaching the next one.
+            if (wrathLease == lease)
+                SetWrathRotationEnabled(lease, false);
+        }
     }
 
     private async Task<CombatResult> KillWithBossModAsync(IBattleNpc target, CancellationToken cancellationToken)
@@ -313,7 +331,9 @@ public sealed class CombatProvider : ICombatProvider
             if (lease is null)
                 return null;
 
-            if (!IsSuccessful(wrathSetAutoRotationState.InvokeFunc(lease.Value, true)))
+            // Keep the lease dormant while LootHunter travels. KillWithWrathAsync enables
+            // autorotation only after navigation has stopped inside combat range.
+            if (!SetWrathRotationEnabled(lease.Value, false))
             {
                 ReleaseWrathLease(lease.Value);
                 return null;
@@ -328,6 +348,11 @@ public sealed class CombatProvider : ICombatProvider
                 || !SetWrathConfig(lease.Value, WrathAutoRotationConfigOption.OnlyAttackInCombat, false)
                 || !SetWrathConfig(lease.Value, WrathAutoRotationConfigOption.DpsAlwaysHardTarget, true)
                 || !SetWrathConfig(lease.Value, WrathAutoRotationConfigOption.HealerAlwaysHardTarget, true))
+            {
+                ReleaseWrathLease(lease.Value);
+                return null;
+            }
+            if (!SetWrathRotationEnabled(lease.Value, false))
             {
                 ReleaseWrathLease(lease.Value);
                 return null;
@@ -367,6 +392,12 @@ public sealed class CombatProvider : ICombatProvider
     private bool SetWrathConfig(Guid lease, WrathAutoRotationConfigOption option, object value)
     {
         try { return IsSuccessful(wrathSetAutoRotationConfigState.InvokeFunc(lease, option, value)); }
+        catch { return false; }
+    }
+
+    private bool SetWrathRotationEnabled(Guid lease, bool enabled)
+    {
+        try { return IsSuccessful(wrathSetAutoRotationState.InvokeFunc(lease, enabled)); }
         catch { return false; }
     }
 

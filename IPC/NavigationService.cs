@@ -96,7 +96,8 @@ public sealed class NavigationService : INavigationService
         float stopDistance,
         bool fly,
         CancellationToken cancellationToken,
-        Func<bool>? interruptRequested = null)
+        Func<bool>? interruptRequested = null,
+        float arrivalTolerance = 1.5f)
     {
         if (!await WaitUntilReadyAsync(cancellationToken))
             return NavigationMoveResult.Failed;
@@ -109,12 +110,15 @@ public sealed class NavigationService : INavigationService
         if (player is null)
             return NavigationMoveResult.Failed;
 
+        stopDistance = Math.Max(0.5f, stopDistance);
+        arrivalTolerance = Math.Max(0f, arrivalTolerance);
+
         var currentDistance = Vector3.Distance(player.Position, snapped.Value);
-        if (currentDistance <= stopDistance)
+        if (currentDistance <= stopDistance + arrivalTolerance)
             return NavigationMoveResult.Arrived;
 
         Stop();
-        if (!moveClose.InvokeFunc(snapped.Value, fly, Math.Max(0.5f, stopDistance)))
+        if (!moveClose.InvokeFunc(snapped.Value, fly, stopDistance))
             return NavigationMoveResult.Failed;
 
         var deadline = DateTime.UtcNow.AddSeconds(Math.Max(15, configuration.NavigationTimeoutSeconds));
@@ -136,7 +140,7 @@ public sealed class NavigationService : INavigationService
                 return NavigationMoveResult.Failed;
 
             currentDistance = Vector3.Distance(player.Position, snapped.Value);
-            if (currentDistance <= stopDistance + 1.5f)
+            if (currentDistance <= stopDistance + arrivalTolerance)
             {
                 Stop();
                 return NavigationMoveResult.Arrived;
@@ -155,7 +159,9 @@ public sealed class NavigationService : INavigationService
             }
 
             if (!IsRunning)
-                return currentDistance <= stopDistance + 3f ? NavigationMoveResult.Arrived : NavigationMoveResult.Failed;
+                return currentDistance <= stopDistance + arrivalTolerance
+                    ? NavigationMoveResult.Arrived
+                    : NavigationMoveResult.Failed;
 
             await Task.Delay(150, cancellationToken);
         }

@@ -8,6 +8,9 @@ namespace LootHunter.Automation;
 
 public sealed class FarmController
 {
+    private const float CombatArrivalTolerance = 0.25f;
+    private const float CombatReapproachTolerance = 0.75f;
+
     private readonly Configuration configuration;
     private readonly IInventoryService inventory;
     private readonly IMobDropDatabase database;
@@ -558,20 +561,26 @@ public sealed class FarmController
         if (player is null)
             return false;
 
-        if (Vector3.Distance(player.Position, battleNpc.Position) > configuration.CombatApproachDistance + 1f)
+        var combatDistance = Math.Clamp(configuration.CombatApproachDistance, 1.5f, 15f);
+        if (Vector3.Distance(player.Position, battleNpc.Position) > combatDistance + CombatArrivalTolerance)
         {
             SetState(FarmState.Navigating, $"Approaching {farmTarget.MobName}");
             var approach = await navigation.MoveToAsync(
                 battleNpc.Position,
-                Math.Max(1.5f, configuration.CombatApproachDistance),
+                combatDistance,
                 configuration.UseFlight && mount.IsMounted && mount.CanFly,
-                token);
+                token,
+                arrivalTolerance: CombatArrivalTolerance);
             if (approach != NavigationMoveResult.Arrived)
             {
                 RegisterNavigationFailure(farmTarget, $"Could not approach visible {farmTarget.MobName}.");
                 return false;
             }
         }
+
+        // Make the travel/approach handoff explicit before dismounting or enabling
+        // autorotation. This also clears a vnavmesh path that completed between polls.
+        navigation.Stop();
 
         UpdateProgress();
         if (!TargetStillUseful(farmTarget))
@@ -596,7 +605,7 @@ public sealed class FarmController
 
         targets.SetTarget(battleNpc);
         SetState(FarmState.EngagingMob, $"Engaging {farmTarget.MobName}");
-        var result = await combat.KillAsync(battleNpc, token);
+        var result = await KillWithPositioningAsync(farmTarget, battleNpc, combatDistance, token);
         if (!result.Success)
         {
             session.AddWarning(result.Error ?? $"Combat failed against {farmTarget.MobName}.");
@@ -609,6 +618,97 @@ public sealed class FarmController
         await WaitForLootSettlementAsync(before, inventoryVersionBeforeKill, token);
         UpdateProgress();
         return true;
+    }
+
+    private async Task<CombatResult> KillWithPositioningAsync(
+        FarmTarget farmTarget,
+        IBattleNpc battleNpc,
+        float combatDistance,
+        CancellationToken token)
+    {
+        using var fightCancellation = CancellationTokenSource.CreateLinkedTokenSource(token);
+        var combatTask = combat.KillAsync(battleNpc, fightCancellation.Token);
+        string? positioningError = null;
+
+        try
+        {
+            while (!combatTask.IsCompleted && battleNpc.CurrentHp > 0)
+            {
+                token.ThrowIfCancellationRequested();
+                await WaitIfPausedAsync(token);
+
+                var player = objectTable.LocalPlayer;
+                if (player is null)
+                {
+                    positioningError = "The local player became unavailable during combat.";
+                    break;
+                }
+
+                if (Vector3.Distance(player.Position, battleNpc.Position) > combatDistance + CombatReapproachTolerance)
+                {
+                    SetState(FarmState.Navigating, $"Closing distance to {farmTarget.MobName}");
+                    var moveResult = await navigation.MoveToAsync(
+                        battleNpc.Position,
+                        combatDistance,
+                        fly: false,
+                        cancellationToken: fightCancellation.Token,
+                        interruptRequested: () => pauseRequested || battleNpc.CurrentHp == 0 || combatTask.IsCompleted,
+                        arrivalTolerance: CombatArrivalTolerance);
+
+                    if (combatTask.IsCompleted || battleNpc.CurrentHp == 0)
+                        break;
+
+                    if (moveResult == NavigationMoveResult.Interrupted && pauseRequested)
+                    {
+                        await WaitIfPausedAsync(token);
+                        SetState(FarmState.EngagingMob, $"Engaging {farmTarget.MobName}");
+                        continue;
+                    }
+
+                    if (moveResult != NavigationMoveResult.Arrived)
+                    {
+                        positioningError = $"Could not stay within combat range of {farmTarget.MobName}.";
+                        break;
+                    }
+
+                    // Navigation can temporarily disturb the hard target. Reassert it when
+                    // the character is back in range and let the combat provider continue.
+                    targets.SetTarget(battleNpc);
+                    SetState(FarmState.EngagingMob, $"Engaging {farmTarget.MobName}");
+                }
+
+                await Task.WhenAny(combatTask, Task.Delay(250, token));
+            }
+
+            if (positioningError is null)
+                return await combatTask;
+
+            fightCancellation.Cancel();
+            return new CombatResult(false, positioningError);
+        }
+        finally
+        {
+            fightCancellation.Cancel();
+            navigation.Stop();
+
+            if (!combatTask.IsCompletedSuccessfully)
+            {
+                try
+                {
+                    await combatTask;
+                }
+                catch (OperationCanceledException) when (fightCancellation.IsCancellationRequested)
+                {
+                    // Expected when movement fails or the farm session is stopped.
+                }
+                catch (Exception ex)
+                {
+                    // Preserve the primary movement/cancellation result while still observing
+                    // an asynchronously faulted combat provider task.
+                    log.Warning(ex, "Combat provider faulted while combat positioning was stopping.");
+                }
+            }
+        }
     }
 
     private async Task WaitForLootSettlementAsync(
