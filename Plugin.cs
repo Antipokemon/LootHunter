@@ -21,6 +21,7 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IPlayerState PlayerState { get; private set; } = null!;
     [PluginService] internal static IDataManager DataManager { get; private set; } = null!;
     [PluginService] internal static IObjectTable ObjectTable { get; private set; } = null!;
+    [PluginService] internal static ICondition Condition { get; private set; } = null!;
     [PluginService] internal static ITargetManager TargetManager { get; private set; } = null!;
     [PluginService] internal static IAetheryteList AetheryteList { get; private set; } = null!;
     [PluginService] internal static IDutyState DutyState { get; private set; } = null!;
@@ -51,7 +52,7 @@ public sealed class Plugin : IDalamudPlugin
         var travel = new TravelService(PluginInterface, ClientState, Configuration);
         var navigation = new NavigationService(PluginInterface, ObjectTable, Configuration);
         var targetService = new TargetService(ObjectTable, TargetManager);
-        var mount = new MountService(ObjectTable, Log);
+        var mount = new MountService(ObjectTable, Condition, Log);
         var combat = new CombatProvider(PluginInterface, TargetManager, PlayerState, Configuration);
 
         FarmController = new FarmController(

@@ -248,7 +248,7 @@ public sealed class FarmController
             : $"Verifying monster locations for {entryItemIds.Count} items");
         await database.EnsureSourcesResolvedAsync(entryItemIds, token, includeKnownSources: true);
 
-        database.RefreshTravelDestinations();
+        database.RefreshTravelDestinations(entryItemIds);
 
         foreach (var entry in entries)
         {
@@ -494,7 +494,7 @@ public sealed class FarmController
             {
                 SetState(FarmState.Validating, $"Looking up fresh spawn data for {target.MobName}");
                 await database.EnsureSourcesResolvedAsync(unresolvedItems, token, includeKnownSources: true);
-                database.RefreshTravelDestinations();
+                database.RefreshTravelDestinations(unresolvedItems);
 
                 var refreshed = unresolvedItems
                     .SelectMany(database.GetSourcesForItem)
@@ -537,7 +537,11 @@ public sealed class FarmController
 
     private async Task<bool> KillAndRecordAsync(FarmTarget farmTarget, IBattleNpc battleNpc, CancellationToken token)
     {
-        navigation.Stop();
+        if (!await navigation.StopAsync(token))
+        {
+            RegisterNavigationFailure(farmTarget, $"Could not stop the active route for visible {farmTarget.MobName}.");
+            return false;
+        }
 
         // The inventory can change while traveling or while another kill is resolving.
         // Never engage another mob once all of its requested drops are already satisfied.
@@ -557,35 +561,25 @@ public sealed class FarmController
             }
         }
 
-        var player = objectTable.LocalPlayer;
-        if (player is null)
-            return false;
-
         var combatDistance = Math.Clamp(configuration.CombatApproachDistance, 1.5f, 15f);
-        if (Vector3.Distance(player.Position, battleNpc.Position) > combatDistance + CombatArrivalTolerance)
+
+        // The game will not allow dismounting in mid-air. If a mob interrupts a
+        // flying route, replace that route with a landing approach to the mob first.
+        if (mount.IsMounted && mount.IsInFlight)
         {
-            SetState(FarmState.Navigating, $"Approaching {farmTarget.MobName}");
-            var approach = await navigation.MoveToAsync(
+            SetState(FarmState.Navigating, $"Landing near {farmTarget.MobName}");
+            var landingApproach = await navigation.MoveToAsync(
                 battleNpc.Position,
-                combatDistance,
-                configuration.UseFlight && mount.IsMounted && mount.CanFly,
-                token,
+                stopDistance: 0.5f,
+                fly: true,
+                cancellationToken: token,
                 arrivalTolerance: CombatArrivalTolerance);
-            if (approach != NavigationMoveResult.Arrived)
+            if (landingApproach != NavigationMoveResult.Arrived || !await navigation.StopAsync(token))
             {
-                RegisterNavigationFailure(farmTarget, $"Could not approach visible {farmTarget.MobName}.");
+                RegisterNavigationFailure(farmTarget, $"Could not land near visible {farmTarget.MobName}.");
                 return false;
             }
         }
-
-        // Make the travel/approach handoff explicit before dismounting or enabling
-        // autorotation. This also clears a vnavmesh path that completed between polls.
-        navigation.Stop();
-
-        UpdateProgress();
-        if (!TargetStillUseful(farmTarget))
-            return true;
-        EnsureInventorySpace();
 
         if (mount.IsMounted)
         {
@@ -597,6 +591,39 @@ public sealed class FarmController
                 return false;
             }
         }
+
+        var player = objectTable.LocalPlayer;
+        if (player is null)
+            return false;
+
+        // Always make the final combat approach on foot. Autorotation remains
+        // disabled until this movement has stopped inside the configured range.
+        if (Vector3.Distance(player.Position, battleNpc.Position) > combatDistance + CombatArrivalTolerance)
+        {
+            SetState(FarmState.Navigating, $"Approaching {farmTarget.MobName} on foot");
+            var approach = await navigation.MoveToAsync(
+                battleNpc.Position,
+                combatDistance,
+                fly: false,
+                cancellationToken: token,
+                arrivalTolerance: CombatArrivalTolerance);
+            if (approach != NavigationMoveResult.Arrived)
+            {
+                RegisterNavigationFailure(farmTarget, $"Could not approach visible {farmTarget.MobName} on foot.");
+                return false;
+            }
+        }
+
+        if (!await navigation.StopAsync(token))
+        {
+            RegisterNavigationFailure(farmTarget, $"Could not stop after approaching visible {farmTarget.MobName}.");
+            return false;
+        }
+
+        UpdateProgress();
+        if (!TargetStillUseful(farmTarget))
+            return true;
+        EnsureInventorySpace();
 
         var before = farmTarget.RelevantDropItemIds
             .Where(goals.ContainsKey)

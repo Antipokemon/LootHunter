@@ -166,10 +166,17 @@ public sealed class MobDropDatabase : IMobDropDatabase, IDisposable
         await Task.WhenAll(tasks).WaitAsync(cancellationToken);
     }
 
-    public void RefreshTravelDestinations()
+    public void RefreshTravelDestinations(IEnumerable<uint>? itemIds = null)
     {
+        var sources = itemIds is null
+            ? byItem.Values.SelectMany(x => x)
+            : itemIds
+                .Where(x => x != 0)
+                .Distinct()
+                .SelectMany(itemId => byItem.GetValueOrDefault(itemId) ?? []);
+
         var seen = new HashSet<MobSourceKey>();
-        foreach (var source in byItem.Values.SelectMany(x => x))
+        foreach (var source in sources)
         {
             var key = new MobSourceKey(source.BNpcNameId, source.TerritoryId);
             if (!seen.Add(key))

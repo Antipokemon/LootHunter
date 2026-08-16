@@ -117,7 +117,10 @@ public sealed class NavigationService : INavigationService
         if (currentDistance <= stopDistance + arrivalTolerance)
             return NavigationMoveResult.Arrived;
 
-        Stop();
+        if (!await StopAsync(cancellationToken))
+            return NavigationMoveResult.Failed;
+        if (!await WaitUntilReadyAsync(cancellationToken))
+            return NavigationMoveResult.Failed;
         if (!moveClose.InvokeFunc(snapped.Value, fly, stopDistance))
             return NavigationMoveResult.Failed;
 
@@ -131,7 +134,7 @@ public sealed class NavigationService : INavigationService
 
             if (interruptRequested?.Invoke() == true)
             {
-                Stop();
+                await StopAsync(cancellationToken);
                 return NavigationMoveResult.Interrupted;
             }
 
@@ -142,7 +145,7 @@ public sealed class NavigationService : INavigationService
             currentDistance = Vector3.Distance(player.Position, snapped.Value);
             if (currentDistance <= stopDistance + arrivalTolerance)
             {
-                Stop();
+                await StopAsync(cancellationToken);
                 return NavigationMoveResult.Arrived;
             }
 
@@ -154,7 +157,7 @@ public sealed class NavigationService : INavigationService
 
             if (DateTime.UtcNow - lastProgressAt > TimeSpan.FromSeconds(Math.Max(5, configuration.NavigationStallSeconds)))
             {
-                Stop();
+                await StopAsync(cancellationToken);
                 return NavigationMoveResult.Failed;
             }
 
@@ -166,19 +169,55 @@ public sealed class NavigationService : INavigationService
             await Task.Delay(150, cancellationToken);
         }
 
-        Stop();
+        await StopAsync(cancellationToken);
         return NavigationMoveResult.Failed;
     }
 
-    public void Stop()
+    public async Task<bool> StopAsync(CancellationToken cancellationToken)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(2);
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            StopPath(cancelPending: false);
+
+            // SimpleMove installs a completed path during vnavmesh's next framework
+            // update. Yield once, then stop again so a result that completed during
+            // the first Stop cannot resurrect the route we just cancelled.
+            await Task.Delay(50, cancellationToken);
+            StopPath(cancelPending: false);
+
+            if (!IsRunning)
+                return true;
+            if (DateTime.UtcNow >= deadline)
+            {
+                // Exceptionally slow pathfinding cannot be allowed to take control
+                // later. Fall back to vnavmesh's global cancellation endpoint.
+                Stop();
+                await Task.Delay(50, cancellationToken);
+                StopPath(cancelPending: false);
+                return !IsRunning;
+            }
+        }
+    }
+
+    public void Stop() => StopPath(cancelPending: true);
+
+    private void StopPath(bool cancelPending)
     {
         try
         {
+            // Cancel a pending SimpleMove request before clearing its current
+            // waypoints. Reversing this order leaves a race where the completed
+            // request installs the old path immediately after Path.Stop.
+            if (cancelPending
+                && pathfindInProgress.HasFunction
+                && pathfindInProgress.InvokeFunc()
+                && cancelPathfinding.HasAction)
+                cancelPathfinding.InvokeAction();
+
             if (stop.HasAction)
                 stop.InvokeAction();
-
-            if (pathfindInProgress.HasFunction && pathfindInProgress.InvokeFunc() && cancelPathfinding.HasAction)
-                cancelPathfinding.InvokeAction();
         }
         catch
         {

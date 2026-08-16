@@ -15,7 +15,7 @@ public interface IMobDropDatabase
     bool IsResolving(uint itemId);
     string? GetResolutionError(uint itemId);
     Task EnsureSourcesResolvedAsync(IEnumerable<uint> itemIds, CancellationToken cancellationToken, bool includeKnownSources = false);
-    void RefreshTravelDestinations();
+    void RefreshTravelDestinations(IEnumerable<uint>? itemIds = null);
 }
 
 public interface IInventoryService : IDisposable
@@ -69,12 +69,14 @@ public interface INavigationService
         Func<bool>? interruptRequested = null,
         float arrivalTolerance = 1.5f);
     Vector3? SnapToFloor(Vector3 destination);
+    Task<bool> StopAsync(CancellationToken cancellationToken);
     void Stop();
 }
 
 public interface IMountService
 {
     bool IsMounted { get; }
+    bool IsInFlight { get; }
     bool CanFly { get; }
     Task<bool> MountAsync(CancellationToken cancellationToken);
     Task<bool> DismountAsync(CancellationToken cancellationToken);
