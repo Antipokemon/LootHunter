@@ -213,7 +213,7 @@ public sealed class FarmController
             throw new InvalidOperationException("vnavmesh IPC is unavailable. Install and enable vnavmesh.");
         if (!combat.IsAvailable)
             throw new InvalidOperationException(combat.AvailabilityError ?? "BossModReborn IPC is unavailable.");
-        if (combat.AvailabilityError is { Length: > 0 } combatError)
+        if (combat.PrepareForSession() is { Length: > 0 } combatError)
             throw new InvalidOperationException(combatError);
         if (inventory.GetFreeNormalInventorySlots() <= 0)
             throw new InvalidOperationException("Your normal inventory is full.");

@@ -76,6 +76,7 @@ public interface ICombatProvider
     string Name { get; }
     bool IsAvailable { get; }
     string? AvailabilityError { get; }
+    string? PrepareForSession();
     Task<CombatResult> KillAsync(IBattleNpc target, CancellationToken cancellationToken);
 }
 

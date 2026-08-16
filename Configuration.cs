@@ -23,7 +23,7 @@ public sealed class Configuration : IPluginConfiguration
     public int NavigationTimeoutSeconds { get; set; } = 90;
     public int CombatTimeoutSeconds { get; set; } = 120;
 
-    // Blank means preserve/use the currently active BossMod autorotation preset.
+    // Blank means use LootHunter's automatically managed BossModReborn combat preset.
     public string BossModPresetName { get; set; } = string.Empty;
 
     public List<LootList> LootLists { get; set; } = [];
