@@ -8,6 +8,8 @@ namespace LootHunter.IPC;
 
 public sealed class NavigationService : INavigationService
 {
+    private const int MaxPathRecoveryAttempts = 2;
+
     private readonly ICallGateSubscriber<bool> navReady;
     private readonly ICallGateSubscriber<Vector3, bool, float, bool> moveClose;
     private readonly ICallGateSubscriber<List<Vector3>, bool, object> moveDirect;
@@ -19,11 +21,17 @@ public sealed class NavigationService : INavigationService
     private readonly ICallGateSubscriber<object> cancelPathfinding;
     private readonly IObjectTable objectTable;
     private readonly Configuration configuration;
+    private readonly IPluginLog log;
 
-    public NavigationService(IDalamudPluginInterface pluginInterface, IObjectTable objectTable, Configuration configuration)
+    public NavigationService(
+        IDalamudPluginInterface pluginInterface,
+        IObjectTable objectTable,
+        Configuration configuration,
+        IPluginLog log)
     {
         this.objectTable = objectTable;
         this.configuration = configuration;
+        this.log = log;
         navReady = pluginInterface.GetIpcSubscriber<bool>("vnavmesh.Nav.IsReady");
         moveClose = pluginInterface.GetIpcSubscriber<Vector3, bool, float, bool>("vnavmesh.SimpleMove.PathfindAndMoveCloseTo");
         moveDirect = pluginInterface.GetIpcSubscriber<List<Vector3>, bool, object>("vnavmesh.Path.MoveTo");
@@ -120,11 +128,34 @@ public sealed class NavigationService : INavigationService
         if (currentDistance <= stopDistance + arrivalTolerance)
             return NavigationMoveResult.Arrived;
 
-        if (!await StopAsync(cancellationToken))
-            return NavigationMoveResult.Failed;
-        if (!await WaitUntilReadyAsync(cancellationToken))
-            return NavigationMoveResult.Failed;
-        if (!moveClose.InvokeFunc(snapped.Value, fly, stopDistance))
+        async Task<bool> StartPathAsync()
+            => await StopAsync(cancellationToken)
+               && await WaitUntilReadyAsync(cancellationToken)
+               && moveClose.InvokeFunc(snapped.Value, fly, stopDistance);
+
+        var recoveryAttempts = 0;
+        async Task<bool> RecoverPathAsync(string reason)
+        {
+            while (recoveryAttempts < MaxPathRecoveryAttempts)
+            {
+                recoveryAttempts++;
+                log.Warning(
+                    "Navigation {Reason}; requesting a fresh route from the current position ({Attempt}/{Maximum}).",
+                    reason,
+                    recoveryAttempts,
+                    MaxPathRecoveryAttempts);
+                await Task.Delay(250, cancellationToken);
+                if (await StartPathAsync())
+                    return true;
+
+                reason = "recovery request was rejected";
+            }
+
+            return false;
+        }
+
+        if (!await StartPathAsync()
+            && !await RecoverPathAsync("request was rejected"))
             return NavigationMoveResult.Failed;
 
         var deadline = DateTime.UtcNow.AddSeconds(Math.Max(15, configuration.NavigationTimeoutSeconds));
@@ -160,14 +191,40 @@ public sealed class NavigationService : INavigationService
 
             if (DateTime.UtcNow - lastProgressAt > TimeSpan.FromSeconds(Math.Max(5, configuration.NavigationStallSeconds)))
             {
-                await StopAsync(cancellationToken);
-                return NavigationMoveResult.Failed;
+                if (!await RecoverPathAsync("stalled"))
+                {
+                    await StopAsync(cancellationToken);
+                    return NavigationMoveResult.Failed;
+                }
+
+                player = objectTable.LocalPlayer;
+                if (player is null)
+                    return NavigationMoveResult.Failed;
+                bestDistance = DistanceToDestination(player.Position, snapped.Value, horizontalArrival);
+                lastProgressAt = DateTime.UtcNow;
+                continue;
             }
 
             if (!IsRunning)
-                return currentDistance <= stopDistance + arrivalTolerance
-                    ? NavigationMoveResult.Arrived
-                    : NavigationMoveResult.Failed;
+            {
+                // SimpleMove can have a short handoff between pathfinding and movement.
+                // Give that handoff one framework beat before deciding the route ended.
+                await Task.Delay(250, cancellationToken);
+                player = objectTable.LocalPlayer;
+                if (player is null)
+                    return NavigationMoveResult.Failed;
+
+                currentDistance = DistanceToDestination(player.Position, snapped.Value, horizontalArrival);
+                if (currentDistance <= stopDistance + arrivalTolerance)
+                    return NavigationMoveResult.Arrived;
+                if (IsRunning)
+                    continue;
+                if (!await RecoverPathAsync("ended before arrival"))
+                    return NavigationMoveResult.Failed;
+
+                bestDistance = currentDistance;
+                lastProgressAt = DateTime.UtcNow;
+            }
 
             await Task.Delay(150, cancellationToken);
         }
@@ -201,6 +258,7 @@ public sealed class NavigationService : INavigationService
         var lastProgressAt = DateTime.UtcNow;
         var nextDestinationUpdate = DateTime.MinValue;
         var bestDistance = float.MaxValue;
+        var recoveryAttempts = 0;
 
         while (DateTime.UtcNow < deadline)
         {
@@ -237,8 +295,34 @@ public sealed class NavigationService : INavigationService
 
             if (DateTime.UtcNow - lastProgressAt > TimeSpan.FromSeconds(Math.Max(5, configuration.NavigationStallSeconds)))
             {
-                await StopAsync(cancellationToken);
-                return NavigationMoveResult.Failed;
+                if (recoveryAttempts >= MaxPathRecoveryAttempts)
+                {
+                    await StopAsync(cancellationToken);
+                    return NavigationMoveResult.Failed;
+                }
+
+                var restarted = false;
+                while (!restarted && recoveryAttempts < MaxPathRecoveryAttempts)
+                {
+                    recoveryAttempts++;
+                    log.Warning(
+                        "Navigation to a moving target stalled; requesting a fresh route ({Attempt}/{Maximum}).",
+                        recoveryAttempts,
+                        MaxPathRecoveryAttempts);
+                    restarted = await StopAsync(cancellationToken)
+                                && await WaitUntilReadyAsync(cancellationToken)
+                                && moveClose.InvokeFunc(destination.Value, false, stopDistance);
+                    if (!restarted)
+                        await Task.Delay(250, cancellationToken);
+                }
+
+                if (!restarted)
+                    return NavigationMoveResult.Failed;
+
+                bestDistance = distance;
+                lastProgressAt = DateTime.UtcNow;
+                nextDestinationUpdate = DateTime.UtcNow.AddSeconds(2);
+                continue;
             }
 
             if (DateTime.UtcNow >= nextDestinationUpdate)

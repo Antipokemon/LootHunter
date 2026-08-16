@@ -136,7 +136,7 @@ public sealed class ConfigWindow : Window
         var changed = false;
 
         var avoidAreaAttacks = config.AvoidAreaAttacks;
-        if (ImGui.Checkbox("Avoid area attacks with BossModReborn AI", ref avoidAreaAttacks))
+        if (ImGui.Checkbox("Avoid area attacks with BossMod Reborn", ref avoidAreaAttacks))
         {
             config.AvoidAreaAttacks = avoidAreaAttacks;
             changed = true;

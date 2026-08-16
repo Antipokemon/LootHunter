@@ -81,39 +81,70 @@ public sealed class FarmController
            && navigation.IsAvailable
            && combat.IsAvailable
            && (!configuration.AvoidAreaAttacks || combat.IsAreaAvoidanceAvailable);
-    public IReadOnlyList<PluginRequirementStatus> PluginRequirements =>
-    [
-        new(
-            "Lifestream",
-            true,
-            travel.IsAvailable,
-            travel.IsAvailable ? "Ready for teleportation." : "Install and enable Lifestream.",
-            "Lifestream"),
-        new(
-            "vnavmesh",
-            true,
-            navigation.IsAvailable,
-            navigation.IsAvailable ? "Ready for pathfinding and movement." : "Install and enable vnavmesh.",
-            "vnavmesh"),
-        new(
-            "Combat rotation",
-            true,
-            combat.IsAvailable,
-            combat.IsAvailable
-                ? $"{combat.Name} is ready."
-                : combat.AvailabilityError ?? "Install and enable Wrath Combo or BossModReborn.",
-            combat.Name == "WrathCombo" ? "Wrath Combo" : "BossModReborn"),
-        new(
-            "BossModReborn AI",
-            configuration.AvoidAreaAttacks,
-            combat.IsAreaAvoidanceAvailable,
-            combat.IsAreaAvoidanceAvailable
-                ? "Ready to route around outdoor area attacks."
-                : configuration.AvoidAreaAttacks
-                    ? "Install and enable BossModReborn to use area-attack avoidance."
-                    : "Optional while area-attack avoidance is disabled.",
-            "BossModReborn"),
-    ];
+    public IReadOnlyList<PluginRequirementStatus> PluginRequirements
+    {
+        get
+        {
+            var requirements = new List<PluginRequirementStatus>
+            {
+                new(
+                    "Lifestream",
+                    true,
+                    travel.IsAvailable,
+                    travel.IsAvailable ? "Ready for teleportation." : "Install and enable Lifestream.",
+                    "Lifestream"),
+                new(
+                    "vnavmesh",
+                    true,
+                    navigation.IsAvailable,
+                    navigation.IsAvailable ? "Ready for pathfinding and movement." : "Install and enable vnavmesh.",
+                    "vnavmesh"),
+            };
+
+            if (combat.Name == "BossMod Reborn")
+            {
+                var available = combat.IsAvailable
+                                && (!configuration.AvoidAreaAttacks || combat.IsAreaAvoidanceAvailable);
+                requirements.Add(new(
+                    "BossMod Reborn",
+                    true,
+                    available,
+                    available
+                        ? configuration.AvoidAreaAttacks
+                            ? "Ready for combat rotation and area-attack avoidance."
+                            : "Ready for combat rotation."
+                        : configuration.AvoidAreaAttacks
+                            ? "Install and enable BossMod Reborn for combat rotation and area-attack avoidance."
+                            : combat.AvailabilityError ?? "Install and enable BossMod Reborn for combat rotation.",
+                    "BossMod Reborn"));
+            }
+            else
+            {
+                requirements.Add(new(
+                    "Wrath Combo",
+                    true,
+                    combat.IsAvailable,
+                    combat.IsAvailable
+                        ? "Ready for combat rotation."
+                        : combat.AvailabilityError ?? "Install and enable Wrath Combo for combat rotation.",
+                    "Wrath Combo"));
+
+                if (configuration.AvoidAreaAttacks)
+                {
+                    requirements.Add(new(
+                        "BossMod Reborn",
+                        true,
+                        combat.IsAreaAvoidanceAvailable,
+                        combat.IsAreaAvoidanceAvailable
+                            ? "Ready for area-attack avoidance."
+                            : "Install and enable BossMod Reborn for area-attack avoidance.",
+                        "BossMod Reborn"));
+                }
+            }
+
+            return requirements;
+        }
+    }
 
     public Task StartAsync(LootList list)
     {

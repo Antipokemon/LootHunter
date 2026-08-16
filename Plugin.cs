@@ -51,7 +51,7 @@ public sealed class Plugin : IDalamudPlugin
         var planner = new RoutePlanner(MobDatabase);
         var safety = new LevelSafetyService(PlayerState, Configuration);
         var travel = new TravelService(PluginInterface, ClientState, Configuration);
-        var navigation = new NavigationService(PluginInterface, ObjectTable, Configuration);
+        var navigation = new NavigationService(PluginInterface, ObjectTable, Configuration, Log);
         var targetService = new TargetService(ObjectTable, TargetManager);
         var mount = new MountService(ObjectTable, Condition, Log);
         var combat = new CombatProvider(PluginInterface, CommandManager, TargetManager, PlayerState, Configuration);

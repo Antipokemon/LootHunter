@@ -109,9 +109,9 @@ public sealed class CombatProvider : ICombatProvider
 
     public string Name => activeProvider switch
     {
-        ActiveCombatProvider.WrathCombo => "WrathCombo",
-        ActiveCombatProvider.BossModReborn => "BossModReborn",
-        _ => IsWrathAvailable ? "WrathCombo" : "BossModReborn",
+        ActiveCombatProvider.WrathCombo => "Wrath Combo",
+        ActiveCombatProvider.BossModReborn => "BossMod Reborn",
+        _ => IsWrathAvailable ? "Wrath Combo" : "BossMod Reborn",
     };
 
     public bool IsAvailable
@@ -120,7 +120,7 @@ public sealed class CombatProvider : ICombatProvider
     public string? AvailabilityError
         => IsAvailable
             ? null
-            : "WrathCombo IPC is unavailable. Install/enable WrathCombo, or install/enable BossModReborn with preset IPC available.";
+            : "Wrath Combo IPC is unavailable. Install/enable Wrath Combo, or install/enable BossMod Reborn with preset IPC available.";
 
     public bool IsAreaAvoidanceAvailable
         => bossForbiddenZonesCount.HasFunction
