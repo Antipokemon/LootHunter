@@ -10,6 +10,7 @@ public sealed class NavigationService : INavigationService
 {
     private readonly ICallGateSubscriber<bool> navReady;
     private readonly ICallGateSubscriber<Vector3, bool, float, bool> moveClose;
+    private readonly ICallGateSubscriber<List<Vector3>, bool, object> moveDirect;
     private readonly ICallGateSubscriber<bool> pathfindInProgress;
     private readonly ICallGateSubscriber<bool> pathRunning;
     private readonly ICallGateSubscriber<Vector3, bool, float, Vector3?> pointOnFloor;
@@ -25,6 +26,7 @@ public sealed class NavigationService : INavigationService
         this.configuration = configuration;
         navReady = pluginInterface.GetIpcSubscriber<bool>("vnavmesh.Nav.IsReady");
         moveClose = pluginInterface.GetIpcSubscriber<Vector3, bool, float, bool>("vnavmesh.SimpleMove.PathfindAndMoveCloseTo");
+        moveDirect = pluginInterface.GetIpcSubscriber<List<Vector3>, bool, object>("vnavmesh.Path.MoveTo");
         pathfindInProgress = pluginInterface.GetIpcSubscriber<bool>("vnavmesh.SimpleMove.PathfindInProgress");
         pathRunning = pluginInterface.GetIpcSubscriber<bool>("vnavmesh.Path.IsRunning");
         pointOnFloor = pluginInterface.GetIpcSubscriber<Vector3, bool, float, Vector3?>("vnavmesh.Query.Mesh.PointOnFloor");
@@ -33,7 +35,7 @@ public sealed class NavigationService : INavigationService
         cancelPathfinding = pluginInterface.GetIpcSubscriber<object>("vnavmesh.Nav.PathfindCancelAll");
     }
 
-    public bool IsAvailable => navReady.HasFunction && moveClose.HasFunction && pathRunning.HasFunction;
+    public bool IsAvailable => navReady.HasFunction && moveClose.HasFunction && moveDirect.HasAction && pathRunning.HasFunction;
     public bool IsReady => IsAvailable && navReady.InvokeFunc();
     public bool IsRunning => IsAvailable && ((pathfindInProgress.HasFunction && pathfindInProgress.InvokeFunc()) || pathRunning.InvokeFunc());
 
@@ -178,6 +180,79 @@ public sealed class NavigationService : INavigationService
         => horizontalOnly
             ? Vector2.Distance(new Vector2(current.X, current.Z), new Vector2(destination.X, destination.Z))
             : Vector3.Distance(current, destination);
+
+    public async Task<NavigationMoveResult> MoveToMovingTargetAsync(
+        Func<Vector3?> targetPosition,
+        float stopDistance,
+        CancellationToken cancellationToken,
+        Func<bool>? interruptRequested = null,
+        float arrivalTolerance = 0.25f)
+    {
+        if (!await WaitUntilReadyAsync(cancellationToken) || !moveDirect.HasAction)
+            return NavigationMoveResult.Failed;
+
+        stopDistance = Math.Max(0.5f, stopDistance);
+        arrivalTolerance = Math.Max(0f, arrivalTolerance);
+
+        if (!await StopAsync(cancellationToken))
+            return NavigationMoveResult.Failed;
+
+        var deadline = DateTime.UtcNow.AddSeconds(Math.Max(15, configuration.NavigationTimeoutSeconds));
+        var lastProgressAt = DateTime.UtcNow;
+        var nextDestinationUpdate = DateTime.MinValue;
+        var bestDistance = float.MaxValue;
+
+        while (DateTime.UtcNow < deadline)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (interruptRequested?.Invoke() == true)
+            {
+                await StopAsync(cancellationToken);
+                return NavigationMoveResult.Interrupted;
+            }
+
+            var player = objectTable.LocalPlayer;
+            var destination = targetPosition();
+            if (player is null || destination is null)
+            {
+                await StopAsync(cancellationToken);
+                return NavigationMoveResult.Failed;
+            }
+
+            // Ground combat movement ignores elevation. The target's live position is
+            // refreshed below so the follower never chases an obsolete pathfind result.
+            var distance = DistanceToDestination(player.Position, destination.Value, horizontalOnly: true);
+            if (distance <= stopDistance + arrivalTolerance)
+            {
+                await StopAsync(cancellationToken);
+                return NavigationMoveResult.Arrived;
+            }
+
+            if (distance < bestDistance - 0.5f)
+            {
+                bestDistance = distance;
+                lastProgressAt = DateTime.UtcNow;
+            }
+
+            if (DateTime.UtcNow - lastProgressAt > TimeSpan.FromSeconds(Math.Max(5, configuration.NavigationStallSeconds)))
+            {
+                await StopAsync(cancellationToken);
+                return NavigationMoveResult.Failed;
+            }
+
+            if (DateTime.UtcNow >= nextDestinationUpdate)
+            {
+                moveDirect.InvokeAction([destination.Value], false);
+                nextDestinationUpdate = DateTime.UtcNow.AddMilliseconds(200);
+            }
+
+            await Task.Delay(100, cancellationToken);
+        }
+
+        await StopAsync(cancellationToken);
+        return NavigationMoveResult.Failed;
+    }
 
     public async Task<bool> StopAsync(CancellationToken cancellationToken)
     {

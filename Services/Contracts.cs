@@ -69,6 +69,12 @@ public interface INavigationService
         Func<bool>? interruptRequested = null,
         float arrivalTolerance = 1.5f,
         bool horizontalArrival = false);
+    Task<NavigationMoveResult> MoveToMovingTargetAsync(
+        Func<Vector3?> targetPosition,
+        float stopDistance,
+        CancellationToken cancellationToken,
+        Func<bool>? interruptRequested = null,
+        float arrivalTolerance = 0.25f);
     Vector3? SnapToFloor(Vector3 destination);
     Task<bool> StopAsync(CancellationToken cancellationToken);
     void Stop();

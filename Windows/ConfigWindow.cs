@@ -57,7 +57,7 @@ public sealed class ConfigWindow : Window
             config.CombatApproachDistance = Math.Clamp(combatDistance, 1.5f, 15f);
             changed = true;
         }
-        ImGui.TextDisabled("LootHunter maintains this distance with vnavmesh while autorotation handles combat actions.");
+        ImGui.TextDisabled("LootHunter directly follows the live target to this distance; autorotation handles combat actions.");
 
         var levelDifference = config.MinimumLevelDifference;
         ImGui.SetNextItemWidth(130f);

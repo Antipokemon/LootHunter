@@ -19,18 +19,54 @@ public sealed class MountService(IObjectTable objectTable, ICondition condition,
         if (IsMounted)
             return true;
 
-        try
+        var deadline = DateTime.UtcNow.AddSeconds(8);
+        var nextAttempt = DateTime.MinValue;
+        var attemptCount = 0;
+        var lastActionStatus = uint.MaxValue;
+        while (DateTime.UtcNow < deadline)
         {
-            if (!UseMountRoulette())
-                return false;
-        }
-        catch (Exception ex)
-        {
-            log.Warning(ex, "Failed to invoke Mount Roulette.");
-            return false;
+            cancellationToken.ThrowIfCancellationRequested();
+            if (IsMounted)
+            {
+                log.Information("Mount completed after {AttemptCount} action attempt(s).", attemptCount);
+                return true;
+            }
+
+            if (DateTime.UtcNow >= nextAttempt)
+            {
+                try
+                {
+                    lastActionStatus = GetMountActionStatus();
+                    if (lastActionStatus == 0)
+                    {
+                        attemptCount++;
+                        var accepted = UseMountRoulette();
+                        log.Information(
+                            "Mount action attempt {AttemptCount}: accepted={Accepted}, mounted={Mounted}.",
+                            attemptCount,
+                            accepted,
+                            IsMounted);
+                        nextAttempt = DateTime.UtcNow.AddMilliseconds(accepted ? 1500 : 500);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    log.Warning(ex, "Failed to invoke Mount Roulette.");
+                    return false;
+                }
+                if (nextAttempt <= DateTime.UtcNow)
+                    nextAttempt = DateTime.UtcNow.AddMilliseconds(500);
+            }
+
+            await Task.Delay(100, cancellationToken);
         }
 
-        return await WaitForMountedStateAsync(true, cancellationToken);
+        log.Warning(
+            "Mount timed out: attempts={AttemptCount}, actionStatus={ActionStatus}, mounted={Mounted}.",
+            attemptCount,
+            lastActionStatus,
+            IsMounted);
+        return IsMounted;
     }
 
     public async Task<bool> DismountAsync(CancellationToken cancellationToken)
@@ -92,21 +128,6 @@ public sealed class MountService(IObjectTable objectTable, ICondition condition,
         return !IsMounted;
     }
 
-    private async Task<bool> WaitForMountedStateAsync(bool mounted, CancellationToken cancellationToken)
-    {
-        var deadline = DateTime.UtcNow.AddSeconds(6);
-        while (DateTime.UtcNow < deadline)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (IsMounted == mounted)
-                return true;
-
-            await Task.Delay(100, cancellationToken);
-        }
-
-        return IsMounted == mounted;
-    }
-
     private static unsafe bool GetCanFly()
     {
         var state = PlayerState.Instance();
@@ -117,6 +138,14 @@ public sealed class MountService(IObjectTable objectTable, ICondition condition,
     {
         var manager = ActionManager.Instance();
         return manager != null && manager->UseAction(ActionType.GeneralAction, MountRouletteGeneralAction);
+    }
+
+    private static unsafe uint GetMountActionStatus()
+    {
+        var manager = ActionManager.Instance();
+        return manager == null
+            ? uint.MaxValue
+            : manager->GetActionStatus(ActionType.GeneralAction, MountRouletteGeneralAction);
     }
 
     private static unsafe uint GetDismountActionStatus()

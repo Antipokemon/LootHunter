@@ -10,6 +10,8 @@ public sealed class FarmController
 {
     private const float CombatArrivalTolerance = 0.25f;
     private const float CombatReapproachTolerance = 0.75f;
+    private const float MountedCombatHandoffDistance = 8f;
+    private static readonly TimeSpan CombatPursuitGrace = TimeSpan.FromMilliseconds(750);
 
     private readonly Configuration configuration;
     private readonly IInventoryService inventory;
@@ -563,28 +565,38 @@ public sealed class FarmController
 
         var combatDistance = Math.Clamp(configuration.CombatApproachDistance, 1.5f, 15f);
 
-        // A flying vnavmesh path ends above the floor and can therefore never satisfy
-        // a tight 3D arrival check. Get horizontally into combat range, stop the path,
-        // then let the game's dedicated dismount action perform landing and dismounting.
-        if (mount.IsMounted && mount.IsInFlight)
-        {
-            SetState(FarmState.Navigating, $"Getting into landing range of {farmTarget.MobName}");
-            var landingApproach = await navigation.MoveToAsync(
-                battleNpc.Position,
-                stopDistance: combatDistance,
-                fly: true,
-                cancellationToken: token,
-                arrivalTolerance: CombatArrivalTolerance,
-                horizontalArrival: true);
-            if (landingApproach != NavigationMoveResult.Arrived || !await navigation.StopAsync(token))
-            {
-                RegisterNavigationFailure(farmTarget, $"Could not get into landing range of visible {farmTarget.MobName}.");
-                return false;
-            }
-        }
+        // Visible mobs bypass the spawn-point travel path, so they need their own
+        // mount decision. This is especially important immediately after a kill.
+        await MountForTravelIfNeededAsync(battleNpc.Position, token);
 
+        // Use obstacle-aware navigation for the mounted portion, but leave enough
+        // room for a deliberate final approach on foot after landing/dismounting.
         if (mount.IsMounted)
         {
+            var fly = configuration.UseFlight && mount.CanFly;
+            var handoffDistance = Math.Max(MountedCombatHandoffDistance, combatDistance + 2f);
+            var mountedPlayer = objectTable.LocalPlayer;
+            var distance = mountedPlayer is null
+                ? float.MaxValue
+                : DistanceToTarget(mountedPlayer.Position, battleNpc.Position, horizontalOnly: fly);
+
+            if (distance > handoffDistance + CombatArrivalTolerance)
+            {
+                SetState(FarmState.Navigating, $"Moving into dismount range of {farmTarget.MobName}");
+                var mountedApproach = await navigation.MoveToAsync(
+                    battleNpc.Position,
+                    stopDistance: handoffDistance,
+                    fly: fly,
+                    cancellationToken: token,
+                    arrivalTolerance: CombatArrivalTolerance,
+                    horizontalArrival: fly);
+                if (mountedApproach != NavigationMoveResult.Arrived || !await navigation.StopAsync(token))
+                {
+                    RegisterNavigationFailure(farmTarget, $"Could not get into dismount range of visible {farmTarget.MobName}.");
+                    return false;
+                }
+            }
+
             SetState(FarmState.Mounting, "Dismounting for combat");
             if (!await mount.DismountAsync(token))
             {
@@ -598,15 +610,15 @@ public sealed class FarmController
         if (player is null)
             return false;
 
-        // Always make the final combat approach on foot. Autorotation remains
-        // disabled until this movement has stopped inside the configured range.
-        if (Vector3.Distance(player.Position, battleNpc.Position) > combatDistance + CombatArrivalTolerance)
+        // Follow the live target position for the short final approach. This uses
+        // vnavmesh's direct path follower, not a navmesh calculation to a stale point.
+        targets.SetTarget(battleNpc);
+        if (DistanceToTarget(player.Position, battleNpc.Position, horizontalOnly: true) > combatDistance + CombatArrivalTolerance)
         {
             SetState(FarmState.Navigating, $"Approaching {farmTarget.MobName} on foot");
-            var approach = await navigation.MoveToAsync(
-                battleNpc.Position,
+            var approach = await navigation.MoveToMovingTargetAsync(
+                () => battleNpc.CurrentHp > 0 ? battleNpc.Position : null,
                 combatDistance,
-                fly: false,
                 cancellationToken: token,
                 arrivalTolerance: CombatArrivalTolerance);
             if (approach != NavigationMoveResult.Arrived)
@@ -658,6 +670,7 @@ public sealed class FarmController
         using var fightCancellation = CancellationTokenSource.CreateLinkedTokenSource(token);
         var combatTask = combat.KillAsync(battleNpc, fightCancellation.Token);
         string? positioningError = null;
+        DateTime? outOfRangeSince = null;
 
         try
         {
@@ -673,38 +686,45 @@ public sealed class FarmController
                     break;
                 }
 
-                if (Vector3.Distance(player.Position, battleNpc.Position) > combatDistance + CombatReapproachTolerance)
+                if (DistanceToTarget(player.Position, battleNpc.Position, horizontalOnly: true) > combatDistance + CombatReapproachTolerance)
                 {
-                    SetState(FarmState.Navigating, $"Closing distance to {farmTarget.MobName}");
-                    var moveResult = await navigation.MoveToAsync(
-                        battleNpc.Position,
-                        combatDistance,
-                        fly: false,
-                        cancellationToken: fightCancellation.Token,
-                        interruptRequested: () => pauseRequested || battleNpc.CurrentHp == 0 || combatTask.IsCompleted,
-                        arrivalTolerance: CombatArrivalTolerance);
-
-                    if (combatTask.IsCompleted || battleNpc.CurrentHp == 0)
-                        break;
-
-                    if (moveResult == NavigationMoveResult.Interrupted && pauseRequested)
+                    outOfRangeSince ??= DateTime.UtcNow;
+                    if (DateTime.UtcNow - outOfRangeSince >= CombatPursuitGrace)
                     {
-                        await WaitIfPausedAsync(token);
+                        SetState(FarmState.Navigating, $"Closing distance to {farmTarget.MobName}");
+                        var moveResult = await navigation.MoveToMovingTargetAsync(
+                            () => battleNpc.CurrentHp > 0 ? battleNpc.Position : null,
+                            combatDistance,
+                            cancellationToken: fightCancellation.Token,
+                            interruptRequested: () => pauseRequested || battleNpc.CurrentHp == 0 || combatTask.IsCompleted,
+                            arrivalTolerance: CombatArrivalTolerance);
+
+                        if (combatTask.IsCompleted || battleNpc.CurrentHp == 0)
+                            break;
+
+                        if (moveResult == NavigationMoveResult.Interrupted && pauseRequested)
+                        {
+                            await WaitIfPausedAsync(token);
+                            SetState(FarmState.EngagingMob, $"Engaging {farmTarget.MobName}");
+                            outOfRangeSince = null;
+                            continue;
+                        }
+
+                        if (moveResult != NavigationMoveResult.Arrived)
+                        {
+                            positioningError = $"Could not stay within combat range of {farmTarget.MobName}.";
+                            break;
+                        }
+
+                        // Direct pursuit can temporarily disturb the hard target. Reassert it
+                        // after movement and let the combat provider continue handling actions.
+                        targets.SetTarget(battleNpc);
                         SetState(FarmState.EngagingMob, $"Engaging {farmTarget.MobName}");
-                        continue;
+                        outOfRangeSince = null;
                     }
-
-                    if (moveResult != NavigationMoveResult.Arrived)
-                    {
-                        positioningError = $"Could not stay within combat range of {farmTarget.MobName}.";
-                        break;
-                    }
-
-                    // Navigation can temporarily disturb the hard target. Reassert it when
-                    // the character is back in range and let the combat provider continue.
-                    targets.SetTarget(battleNpc);
-                    SetState(FarmState.EngagingMob, $"Engaging {farmTarget.MobName}");
                 }
+                else
+                    outOfRangeSince = null;
 
                 await Task.WhenAny(combatTask, Task.Delay(250, token));
             }
@@ -838,6 +858,11 @@ public sealed class FarmController
 
     private static string FormatPosition(Vector3 position)
         => $"({position.X:F1}, {position.Y:F1}, {position.Z:F1})";
+
+    private static float DistanceToTarget(Vector3 current, Vector3 target, bool horizontalOnly)
+        => horizontalOnly
+            ? Vector2.Distance(new Vector2(current.X, current.Z), new Vector2(target.X, target.Z))
+            : Vector3.Distance(current, target);
 
     private static int CountSpawnPoints(IReadOnlyList<SpawnCluster> clusters)
         => clusters.Sum(x => x.SpawnPoints.Count);
