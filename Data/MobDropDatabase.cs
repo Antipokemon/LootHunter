@@ -76,22 +76,19 @@ public sealed class MobDropDatabase : IMobDropDatabase
 
         try
         {
-            var gameData = dataManager.GameData;
-            var language = dataManager.Language;
+            // We only need the raw supplemental IDs/positions here. Passing Dalamud's
+            // ClientLanguage would be incorrect because CsvLoader expects Lumina.Data.Language;
+            // the optional population arguments are unnecessary for LootHunter.
             var drops = CsvLoader.LoadResource<MobDrop>(
                 CsvLoader.MobDropResourceName,
                 true,
                 out _,
-                out _,
-                gameData,
-                language) ?? [];
+                out _) ?? [];
             var spawns = CsvLoader.LoadResource<MobSpawnPosition>(
                 CsvLoader.MobSpawnResourceName,
                 true,
                 out _,
-                out _,
-                gameData,
-                language) ?? [];
+                out _) ?? [];
 
             if (drops.Count == 0)
                 throw new InvalidOperationException("LuminaSupplemental returned no monster-drop records.");

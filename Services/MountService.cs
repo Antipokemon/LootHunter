@@ -4,19 +4,12 @@ using FFXIVClientStructs.FFXIV.Client.Game.UI;
 
 namespace LootHunter.Services;
 
-public sealed unsafe class MountService(IObjectTable objectTable, IPluginLog log) : IMountService
+public sealed class MountService(IObjectTable objectTable, IPluginLog log) : IMountService
 {
     private const uint MountRouletteGeneralAction = 9;
 
     public bool IsMounted => objectTable.LocalPlayer?.CurrentMount is not null;
-    public bool CanFly
-    {
-        get
-        {
-            var state = PlayerState.Instance();
-            return state != null && state->IsLoaded && state->CanFly;
-        }
-    }
+    public bool CanFly => GetCanFly();
 
     public async Task<bool> MountAsync(CancellationToken cancellationToken)
     {
@@ -25,8 +18,7 @@ public sealed unsafe class MountService(IObjectTable objectTable, IPluginLog log
 
         try
         {
-            var manager = ActionManager.Instance();
-            if (manager == null || !manager->UseAction(ActionType.GeneralAction, MountRouletteGeneralAction))
+            if (!UseMountRoulette())
                 return false;
         }
         catch (Exception ex)
@@ -45,8 +37,7 @@ public sealed unsafe class MountService(IObjectTable objectTable, IPluginLog log
 
         try
         {
-            var manager = ActionManager.Instance();
-            if (manager == null || !manager->UseAction(ActionType.GeneralAction, MountRouletteGeneralAction))
+            if (!UseMountRoulette())
                 return false;
         }
         catch (Exception ex)
@@ -66,8 +57,22 @@ public sealed unsafe class MountService(IObjectTable objectTable, IPluginLog log
             cancellationToken.ThrowIfCancellationRequested();
             if (IsMounted == mounted)
                 return true;
+
             await Task.Delay(100, cancellationToken);
         }
+
         return IsMounted == mounted;
+    }
+
+    private static unsafe bool GetCanFly()
+    {
+        var state = PlayerState.Instance();
+        return state != null && state->IsLoaded && state->CanFly;
+    }
+
+    private static unsafe bool UseMountRoulette()
+    {
+        var manager = ActionManager.Instance();
+        return manager != null && manager->UseAction(ActionType.GeneralAction, MountRouletteGeneralAction);
     }
 }
