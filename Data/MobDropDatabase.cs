@@ -70,16 +70,42 @@ public sealed class MobDropDatabase : IMobDropDatabase
             return [];
 
         var text = query.Trim();
+        var terms = text.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         IEnumerable<KeyValuePair<uint, string>> candidates = itemNames;
-        if (!string.IsNullOrWhiteSpace(text))
-            candidates = candidates.Where(x => x.Value.Contains(text, StringComparison.OrdinalIgnoreCase));
+
+        if (terms.Length > 0)
+        {
+            candidates = candidates.Where(item =>
+            {
+                var idText = item.Key.ToString();
+                return terms.All(term =>
+                    item.Value.Contains(term, StringComparison.OrdinalIgnoreCase) ||
+                    idText.Contains(term, StringComparison.OrdinalIgnoreCase));
+            });
+        }
 
         return candidates
-            .OrderBy(x => x.Value.StartsWith(text, StringComparison.OrdinalIgnoreCase) ? 0 : 1)
-            .ThenBy(x => x.Value, StringComparer.OrdinalIgnoreCase)
+            .OrderBy(item => GetSearchRank(item, text))
+            .ThenBy(item => item.Value, StringComparer.OrdinalIgnoreCase)
             .Take(limit)
-            .Select(x => new ItemSearchResult(x.Key, x.Value, byItem.GetValueOrDefault(x.Key)?.Count ?? 0))
+            .Select(item => new ItemSearchResult(
+                item.Key,
+                item.Value,
+                byItem.GetValueOrDefault(item.Key)?.Count ?? 0))
             .ToList();
+    }
+
+    private static int GetSearchRank(KeyValuePair<uint, string> item, string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return 0;
+        if (string.Equals(item.Value, text, StringComparison.OrdinalIgnoreCase))
+            return 0;
+        if (item.Value.StartsWith(text, StringComparison.OrdinalIgnoreCase))
+            return 1;
+        if (item.Key.ToString().StartsWith(text, StringComparison.OrdinalIgnoreCase))
+            return 2;
+        return 3;
     }
 
     public void RefreshTravelDestinations()

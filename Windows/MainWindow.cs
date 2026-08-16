@@ -130,12 +130,16 @@ public sealed class MainWindow : Window
 
     private void DrawItemSearch(LootList list)
     {
-        ImGui.TextUnformatted("Add monster drops");
-        ImGui.SetNextItemWidth(320f);
-        ImGui.InputTextWithHint("##ItemSearch", "Search item name...", ref itemSearch, 100);
+        ImGui.TextUnformatted("Add monster drop");
 
         if (!plugin.MobDatabase.IsReady)
         {
+            ImGui.BeginDisabled();
+            ImGui.SetNextItemWidth(420f);
+            if (ImGui.BeginCombo("##MonsterDropPicker", "Select monster drop..."))
+                ImGui.EndCombo();
+            ImGui.EndDisabled();
+
             if (plugin.MobDatabase.IsLoading)
                 ImGui.TextDisabled("Loading monster-drop database...");
             else
@@ -143,33 +147,65 @@ public sealed class MainWindow : Window
             return;
         }
 
-        if (string.IsNullOrWhiteSpace(itemSearch))
+        var sessionRunning = plugin.FarmController.Session.IsRunning;
+        ImGui.BeginDisabled(sessionRunning);
+        ImGui.SetNextItemWidth(420f);
+        if (ImGui.BeginCombo("##MonsterDropPicker", "Select monster drop..."))
         {
-            ImGui.TextDisabled("Type an item name to search the monster-drop database.");
-            return;
-        }
+            ImGui.SetNextItemWidth(-1f);
+            ImGui.InputTextWithHint("##MonsterDropFilter", "Filter by item name or ID...", ref itemSearch, 100);
+            ImGui.Separator();
 
-        var results = plugin.MobDatabase.SearchDropItems(itemSearch, 12);
-        if (results.Count == 0)
-        {
-            ImGui.TextDisabled("No monster-drop items matched that search.");
-            return;
-        }
+            var results = plugin.MobDatabase.SearchDropItems(itemSearch, 150);
+            if (results.Count == 0)
+            {
+                ImGui.TextDisabled("No monster-drop items matched that filter.");
+            }
+            else
+            {
+                ImGui.BeginChild("MonsterDropPickerResults", new Vector2(0f, 280f));
+                if (ImGui.BeginTable("MonsterDropPickerTable", 2, ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp))
+                {
+                    ImGui.TableSetupColumn("Item");
+                    ImGui.TableSetupColumn("Sources", ImGuiTableColumnFlags.WidthFixed, 84f);
 
-        ImGui.BeginChild("ItemSearchResults", new Vector2(0, Math.Min(180, 28 * results.Count + 8)));
-        foreach (var result in results)
-        {
-            var alreadyAdded = list.Items.Any(x => x.ItemId == result.ItemId);
-            ImGui.BeginDisabled(alreadyAdded || plugin.FarmController.Session.IsRunning);
-            if (ImGui.SmallButton(alreadyAdded ? $"Added##{result.ItemId}" : $"Add##{result.ItemId}"))
-                plugin.LootLists.AddItem(list, result.ItemId, 1);
-            ImGui.EndDisabled();
-            ImGui.SameLine();
-            ImGui.TextUnformatted(result.Name);
-            ImGui.SameLine();
-            ImGui.TextDisabled($"({result.SourceCount} source{(result.SourceCount == 1 ? string.Empty : "s")})");
+                    foreach (var result in results)
+                    {
+                        var alreadyAdded = list.Items.Any(x => x.ItemId == result.ItemId);
+                        var sourceText = $"{result.SourceCount} source{(result.SourceCount == 1 ? string.Empty : "s")}";
+
+                        ImGui.TableNextRow();
+                        ImGui.TableSetColumnIndex(0);
+                        ImGui.BeginDisabled(alreadyAdded);
+                        if (ImGui.Selectable($"{result.Name}##DropItem{result.ItemId}", false))
+                        {
+                            plugin.LootLists.AddItem(list, result.ItemId, 1);
+                            itemSearch = string.Empty;
+                            ImGui.CloseCurrentPopup();
+                        }
+                        ImGui.EndDisabled();
+
+                        ImGui.TableSetColumnIndex(1);
+                        if (alreadyAdded)
+                            ImGui.TextDisabled("Added");
+                        else
+                            ImGui.TextDisabled(sourceText);
+                    }
+
+                    ImGui.EndTable();
+                }
+                ImGui.EndChild();
+
+                if (results.Count == 150)
+                    ImGui.TextDisabled("Showing the first 150 matches. Type more to narrow the list.");
+            }
+
+            ImGui.EndCombo();
         }
-        ImGui.EndChild();
+        ImGui.EndDisabled();
+
+        if (sessionRunning)
+            ImGui.TextDisabled("Item selection is locked while farming is active.");
     }
 
     private void DrawItems(LootList list)
