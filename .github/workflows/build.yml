@@ -1,0 +1,129 @@
+name: Build LootHunter
+
+on:
+  push:
+    branches:
+      - main
+      - "dev/**"
+      - "feature/**"
+
+  pull_request:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and validate
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Download Dalamud
+        shell: pwsh
+        run: |
+          Invoke-WebRequest `
+            -Uri "https://goatcorp.github.io/dalamud-distrib/latest.zip" `
+            -OutFile "dalamud-latest.zip"
+
+          $dalamudPath = "$env:AppData\XIVLauncher\addon\Hooks\dev"
+
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path $dalamudPath | Out-Null
+
+          Expand-Archive `
+            -Force `
+            -Path "dalamud-latest.zip" `
+            -DestinationPath $dalamudPath
+
+      - name: Restore dependencies
+        run: dotnet restore LootHunter.csproj
+
+      - name: Build LootHunter
+        run: >
+          dotnet build
+          LootHunter.csproj
+          --configuration Release
+          --no-restore
+
+      - name: Validate repo.json
+        shell: pwsh
+        run: |
+          $repo = Get-Content "./repo.json" -Raw | ConvertFrom-Json
+
+          if ($repo.Count -ne 1) {
+              throw "repo.json must contain exactly one LootHunter manifest."
+          }
+
+          $plugin = $repo[0]
+
+          if ($plugin.InternalName -ne "LootHunter") {
+              throw "repo.json InternalName is not LootHunter."
+          }
+
+          if ($plugin.DalamudApiLevel -ne 15) {
+              throw "repo.json DalamudApiLevel must be 15."
+          }
+
+          if (-not $plugin.DownloadLinkInstall.EndsWith("/LootHunter.zip")) {
+              throw "DownloadLinkInstall must point to LootHunter.zip."
+          }
+
+          Write-Host "repo.json validation passed."
+
+      - name: Locate build output
+        shell: pwsh
+        run: |
+          $output = ".\bin\x64\Release\LootHunter"
+
+          if (-not (Test-Path $output)) {
+              Write-Host "Contents of bin:"
+              Get-ChildItem -Recurse .\bin -ErrorAction SilentlyContinue
+              throw "Expected plugin output directory not found: $output"
+          }
+
+          if (-not (Test-Path "$output\LootHunter.dll")) {
+              throw "LootHunter.dll was not produced."
+          }
+
+          if (-not (Test-Path "$output\LootHunter.json")) {
+              throw "LootHunter.json was not produced."
+          }
+
+          Write-Host "Build output:"
+          Get-ChildItem $output
+
+      - name: Create development package
+        shell: pwsh
+        run: |
+          $output = ".\bin\x64\Release\LootHunter"
+          $package = ".\LootHunter.zip"
+
+          if (Test-Path $package) {
+              Remove-Item $package
+          }
+
+          Compress-Archive `
+            -Path "$output\*" `
+            -DestinationPath $package
+
+      - name: Upload plugin package
+        uses: actions/upload-artifact@v4
+        with:
+          name: LootHunter-${{ github.sha }}
+          path: LootHunter.zip
+          if-no-files-found: error
+          retention-days: 14
