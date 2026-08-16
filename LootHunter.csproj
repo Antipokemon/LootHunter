@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project Sdk="Dalamud.NET.Sdk/15.0.0">
+  <PropertyGroup>
+    <Version>0.1.0.0</Version>
+    <Author>Antipokemon</Author>
+    <Name>LootHunter</Name>
+    <Punchline>Autonomous ordinary monster-drop farming.</Punchline>
+    <Description>Create loot lists with target quantities, resolve monster spawns, validate level safety, teleport, mount, navigate, fight, and continue until the list is complete.</Description>
+    <RepoUrl>https://github.com/Antipokemon/LootHunter</RepoUrl>
+    <Tags>loot;farming;monster;automation</Tags>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="LuminaSupplemental.Excel" Version="4.3.0" />
+  </ItemGroup>
+</Project>
