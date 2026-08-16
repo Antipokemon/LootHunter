@@ -1,0 +1,126 @@
+name: Release LootHunter
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and release
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Download Dalamud
+        shell: pwsh
+        run: |
+          Invoke-WebRequest `
+            -Uri "https://goatcorp.github.io/dalamud-distrib/latest.zip" `
+            -OutFile "dalamud-latest.zip"
+
+          $dalamudPath = "$env:AppData\XIVLauncher\addon\Hooks\dev"
+
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path $dalamudPath | Out-Null
+
+          Expand-Archive `
+            -Force `
+            -Path "dalamud-latest.zip" `
+            -DestinationPath $dalamudPath
+
+      - name: Validate release version
+        shell: pwsh
+        run: |
+          [xml]$project = Get-Content ".\LootHunter.csproj"
+          $projectVersion = $project.Project.PropertyGroup.Version
+
+          $repo = Get-Content ".\repo.json" -Raw | ConvertFrom-Json
+          $repoVersion = $repo[0].AssemblyVersion
+
+          $tagVersion = "${{ github.ref_name }}".TrimStart("v")
+
+          Write-Host "Tag version:     $tagVersion"
+          Write-Host "Project version: $projectVersion"
+          Write-Host "Repo version:    $repoVersion"
+
+          if ($tagVersion -ne $projectVersion) {
+              throw "Tag version $tagVersion does not match LootHunter.csproj version $projectVersion."
+          }
+
+          if ($tagVersion -ne $repoVersion) {
+              throw "Tag version $tagVersion does not match repo.json AssemblyVersion $repoVersion."
+          }
+
+      - name: Restore dependencies
+        run: dotnet restore LootHunter.csproj
+
+      - name: Build LootHunter
+        run: >
+          dotnet build
+          LootHunter.csproj
+          --configuration Release
+          --no-restore
+
+      - name: Validate Dalamud package
+        shell: pwsh
+        run: |
+          $package = ".\bin\Release\LootHunter\latest.zip"
+          $testPath = ".\package-test"
+
+          if (-not (Test-Path $package)) {
+              throw "Dalamud SDK package was not produced at $package."
+          }
+
+          if (Test-Path $testPath) {
+              Remove-Item -Recurse -Force $testPath
+          }
+
+          Expand-Archive `
+            -Path $package `
+            -DestinationPath $testPath
+
+          if (-not (Test-Path "$testPath\LootHunter.dll")) {
+              Get-ChildItem -Recurse $testPath
+              throw "LootHunter.dll is missing from the release package."
+          }
+
+          if (-not (Test-Path "$testPath\LootHunter.json")) {
+              Get-ChildItem -Recurse $testPath
+              throw "LootHunter.json is missing from the release package."
+          }
+
+          Write-Host "Release package validation passed."
+          Get-ChildItem $testPath
+
+      - name: Prepare release asset
+        shell: pwsh
+        run: |
+          Copy-Item `
+            ".\bin\Release\LootHunter\latest.zip" `
+            ".\LootHunter.zip" `
+            -Force
+
+          Get-Item ".\LootHunter.zip"
+
+      - name: Create GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" `
+            ".\LootHunter.zip#LootHunter.zip" `
+            --title "LootHunter ${{ github.ref_name }}" `
+            --generate-notes
