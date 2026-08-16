@@ -84,41 +84,68 @@ jobs:
 
           Write-Host "repo.json validation passed."
 
-      - name: Locate build output
+      - name: Validate build output
         shell: pwsh
         run: |
-          $output = ".\bin\x64\Release\LootHunter"
+          $release = ".\bin\Release"
+          $package = ".\bin\Release\LootHunter\latest.zip"
 
-          if (-not (Test-Path $output)) {
-              Write-Host "Contents of bin:"
-              Get-ChildItem -Recurse .\bin -ErrorAction SilentlyContinue
-              throw "Expected plugin output directory not found: $output"
+          if (-not (Test-Path "$release\LootHunter.dll")) {
+              throw "LootHunter.dll was not produced at $release\LootHunter.dll"
           }
 
-          if (-not (Test-Path "$output\LootHunter.dll")) {
-              throw "LootHunter.dll was not produced."
+          if (-not (Test-Path "$release\LootHunter.json")) {
+              throw "LootHunter.json was not produced at $release\LootHunter.json"
           }
 
-          if (-not (Test-Path "$output\LootHunter.json")) {
-              throw "LootHunter.json was not produced."
+          if (-not (Test-Path $package)) {
+              Write-Host "Contents of bin\Release:"
+              Get-ChildItem -Recurse $release -ErrorAction SilentlyContinue
+              throw "Dalamud SDK package was not produced at $package"
           }
 
           Write-Host "Build output:"
-          Get-ChildItem $output
+          Get-ChildItem $release
 
-      - name: Create development package
+          Write-Host "Dalamud package:"
+          Get-Item $package
+
+      - name: Validate Dalamud package contents
         shell: pwsh
         run: |
-          $output = ".\bin\x64\Release\LootHunter"
-          $package = ".\LootHunter.zip"
+          $package = ".\bin\Release\LootHunter\latest.zip"
+          $testPath = ".\package-test"
 
-          if (Test-Path $package) {
-              Remove-Item $package
+          if (Test-Path $testPath) {
+              Remove-Item -Recurse -Force $testPath
           }
 
-          Compress-Archive `
-            -Path "$output\*" `
-            -DestinationPath $package
+          Expand-Archive `
+            -Path $package `
+            -DestinationPath $testPath
+
+          if (-not (Test-Path "$testPath\LootHunter.dll")) {
+              Write-Host "Package contents:"
+              Get-ChildItem -Recurse $testPath
+              throw "LootHunter.dll is missing from the Dalamud package."
+          }
+
+          if (-not (Test-Path "$testPath\LootHunter.json")) {
+              Write-Host "Package contents:"
+              Get-ChildItem -Recurse $testPath
+              throw "LootHunter.json is missing from the Dalamud package."
+          }
+
+          Write-Host "Package validation passed."
+          Get-ChildItem $testPath
+
+      - name: Prepare development package
+        shell: pwsh
+        run: |
+          Copy-Item `
+            ".\bin\Release\LootHunter\latest.zip" `
+            ".\LootHunter.zip" `
+            -Force
 
       - name: Upload plugin package
         uses: actions/upload-artifact@v4
