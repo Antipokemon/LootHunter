@@ -123,6 +123,19 @@ public sealed class MobDropDatabase : IMobDropDatabase, IDisposable
             .ToList();
     }
 
+    private static int GetSearchRank(KeyValuePair<uint, string> item, string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return 0;
+        if (string.Equals(item.Value, text, StringComparison.OrdinalIgnoreCase))
+            return 0;
+        if (item.Value.StartsWith(text, StringComparison.OrdinalIgnoreCase))
+            return 1;
+        if (item.Key.ToString().StartsWith(text, StringComparison.OrdinalIgnoreCase))
+            return 2;
+        return 3;
+    }
+
     public async Task EnsureSourcesResolvedAsync(IEnumerable<uint> itemIds, CancellationToken cancellationToken)
     {
         if (!IsReady)
