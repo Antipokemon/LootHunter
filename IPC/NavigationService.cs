@@ -97,7 +97,8 @@ public sealed class NavigationService : INavigationService
         bool fly,
         CancellationToken cancellationToken,
         Func<bool>? interruptRequested = null,
-        float arrivalTolerance = 1.5f)
+        float arrivalTolerance = 1.5f,
+        bool horizontalArrival = false)
     {
         if (!await WaitUntilReadyAsync(cancellationToken))
             return NavigationMoveResult.Failed;
@@ -113,7 +114,7 @@ public sealed class NavigationService : INavigationService
         stopDistance = Math.Max(0.5f, stopDistance);
         arrivalTolerance = Math.Max(0f, arrivalTolerance);
 
-        var currentDistance = Vector3.Distance(player.Position, snapped.Value);
+        var currentDistance = DistanceToDestination(player.Position, snapped.Value, horizontalArrival);
         if (currentDistance <= stopDistance + arrivalTolerance)
             return NavigationMoveResult.Arrived;
 
@@ -142,7 +143,7 @@ public sealed class NavigationService : INavigationService
             if (player is null)
                 return NavigationMoveResult.Failed;
 
-            currentDistance = Vector3.Distance(player.Position, snapped.Value);
+            currentDistance = DistanceToDestination(player.Position, snapped.Value, horizontalArrival);
             if (currentDistance <= stopDistance + arrivalTolerance)
             {
                 await StopAsync(cancellationToken);
@@ -172,6 +173,11 @@ public sealed class NavigationService : INavigationService
         await StopAsync(cancellationToken);
         return NavigationMoveResult.Failed;
     }
+
+    private static float DistanceToDestination(Vector3 current, Vector3 destination, bool horizontalOnly)
+        => horizontalOnly
+            ? Vector2.Distance(new Vector2(current.X, current.Z), new Vector2(destination.X, destination.Z))
+            : Vector3.Distance(current, destination);
 
     public async Task<bool> StopAsync(CancellationToken cancellationToken)
     {

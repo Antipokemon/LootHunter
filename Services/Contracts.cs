@@ -67,7 +67,8 @@ public interface INavigationService
         bool fly,
         CancellationToken cancellationToken,
         Func<bool>? interruptRequested = null,
-        float arrivalTolerance = 1.5f);
+        float arrivalTolerance = 1.5f,
+        bool horizontalArrival = false);
     Vector3? SnapToFloor(Vector3 destination);
     Task<bool> StopAsync(CancellationToken cancellationToken);
     void Stop();

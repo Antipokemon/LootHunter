@@ -8,6 +8,7 @@ namespace LootHunter.Services;
 public sealed class MountService(IObjectTable objectTable, ICondition condition, IPluginLog log) : IMountService
 {
     private const uint MountRouletteGeneralAction = 9;
+    private const uint DismountGeneralAction = 23;
 
     public bool IsMounted => condition[ConditionFlag.Mounted] || objectTable.LocalPlayer?.CurrentMount is not null;
     public bool IsInFlight => condition[ConditionFlag.InFlight] || condition[ConditionFlag.Diving];
@@ -37,34 +38,57 @@ public sealed class MountService(IObjectTable objectTable, ICondition condition,
         if (!IsMounted)
             return true;
 
-        var deadline = DateTime.UtcNow.AddSeconds(6);
+        var deadline = DateTime.UtcNow.AddSeconds(12);
         var nextAttempt = DateTime.MinValue;
+        var attemptCount = 0;
+        var lastActionStatus = uint.MaxValue;
         while (DateTime.UtcNow < deadline)
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (!IsMounted)
+            {
+                log.Information("Dismount completed after {AttemptCount} action attempt(s).", attemptCount);
                 return true;
+            }
 
-            // Mount Roulette cannot dismount while the character is still flagged
-            // as airborne. The combat landing route ends at floor level; wait for
-            // that state transition, then retry the toggle until it is accepted.
-            if (!IsInFlight && DateTime.UtcNow >= nextAttempt)
+            if (DateTime.UtcNow >= nextAttempt)
             {
                 try
                 {
-                    UseMountRoulette();
+                    lastActionStatus = GetDismountActionStatus();
+                    if (lastActionStatus == 0)
+                    {
+                        attemptCount++;
+                        var accepted = UseDismount();
+                        log.Information(
+                            "Dismount action attempt {AttemptCount}: accepted={Accepted}, mounted={Mounted}, inFlight={InFlight}.",
+                            attemptCount,
+                            accepted,
+                            IsMounted,
+                            IsInFlight);
+                    }
                 }
                 catch (Exception ex)
                 {
                     log.Warning(ex, "Failed to dismount.");
                     return false;
                 }
-                nextAttempt = DateTime.UtcNow.AddMilliseconds(500);
+                nextAttempt = DateTime.UtcNow.AddMilliseconds(250);
             }
 
             await Task.Delay(100, cancellationToken);
         }
 
+        var position = objectTable.LocalPlayer is { } player
+            ? player.Position.ToString()
+            : "unavailable";
+        log.Warning(
+            "Dismount timed out: attempts={AttemptCount}, actionStatus={ActionStatus}, mounted={Mounted}, inFlight={InFlight}, position={Position}.",
+            attemptCount,
+            lastActionStatus,
+            IsMounted,
+            IsInFlight,
+            position);
         return !IsMounted;
     }
 
@@ -93,5 +117,19 @@ public sealed class MountService(IObjectTable objectTable, ICondition condition,
     {
         var manager = ActionManager.Instance();
         return manager != null && manager->UseAction(ActionType.GeneralAction, MountRouletteGeneralAction);
+    }
+
+    private static unsafe uint GetDismountActionStatus()
+    {
+        var manager = ActionManager.Instance();
+        return manager == null
+            ? uint.MaxValue
+            : manager->GetActionStatus(ActionType.GeneralAction, DismountGeneralAction);
+    }
+
+    private static unsafe bool UseDismount()
+    {
+        var manager = ActionManager.Instance();
+        return manager != null && manager->UseAction(ActionType.GeneralAction, DismountGeneralAction);
     }
 }

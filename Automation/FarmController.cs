@@ -563,20 +563,22 @@ public sealed class FarmController
 
         var combatDistance = Math.Clamp(configuration.CombatApproachDistance, 1.5f, 15f);
 
-        // The game will not allow dismounting in mid-air. If a mob interrupts a
-        // flying route, replace that route with a landing approach to the mob first.
+        // A flying vnavmesh path ends above the floor and can therefore never satisfy
+        // a tight 3D arrival check. Get horizontally into combat range, stop the path,
+        // then let the game's dedicated dismount action perform landing and dismounting.
         if (mount.IsMounted && mount.IsInFlight)
         {
-            SetState(FarmState.Navigating, $"Landing near {farmTarget.MobName}");
+            SetState(FarmState.Navigating, $"Getting into landing range of {farmTarget.MobName}");
             var landingApproach = await navigation.MoveToAsync(
                 battleNpc.Position,
-                stopDistance: 0.5f,
+                stopDistance: combatDistance,
                 fly: true,
                 cancellationToken: token,
-                arrivalTolerance: CombatArrivalTolerance);
+                arrivalTolerance: CombatArrivalTolerance,
+                horizontalArrival: true);
             if (landingApproach != NavigationMoveResult.Arrived || !await navigation.StopAsync(token))
             {
-                RegisterNavigationFailure(farmTarget, $"Could not land near visible {farmTarget.MobName}.");
+                RegisterNavigationFailure(farmTarget, $"Could not get into landing range of visible {farmTarget.MobName}.");
                 return false;
             }
         }
