@@ -237,6 +237,12 @@ public sealed class FarmController
             await database.EnsureSourcesResolvedAsync(unresolved, token);
         }
 
+        var entryItemIds = entries.Select(x => x.ItemId).Distinct().ToList();
+        SetState(FarmState.Validating, entryItemIds.Count == 1
+            ? $"Verifying monster locations for {database.GetItemName(entryItemIds[0])}"
+            : $"Verifying monster locations for {entryItemIds.Count} items");
+        await database.EnsureSourcesResolvedAsync(entryItemIds, token, includeKnownSources: true);
+
         database.RefreshTravelDestinations();
 
         foreach (var entry in entries)
@@ -484,6 +490,27 @@ public sealed class FarmController
         if (!sawAnyMobAtSource)
         {
             var key = new MobSourceKey(target.BNpcNameId, target.TerritoryId);
+            var spawnPointCount = CountSpawnPoints(target.Clusters);
+            var unresolvedItems = target.RelevantDropItemIds
+                .Where(CalculateRequiredQuantities().ContainsKey)
+                .ToList();
+
+            if (unresolvedItems.Count > 0)
+            {
+                SetState(FarmState.Validating, $"Looking up fresh spawn data for {target.MobName}");
+                await database.EnsureSourcesResolvedAsync(unresolvedItems, token, includeKnownSources: true);
+                database.RefreshTravelDestinations();
+
+                var refreshed = unresolvedItems
+                    .SelectMany(database.GetSourcesForItem)
+                    .FirstOrDefault(x => x.BNpcNameId == target.BNpcNameId && x.TerritoryId == target.TerritoryId);
+                if (refreshed is not null && CountSpawnPoints(refreshed.Clusters) > spawnPointCount)
+                {
+                    session.AddWarning($"{target.MobName}: no live monsters were found at the static spawn points, so LootHunter added fallback spawn data and will re-plan.");
+                    return true;
+                }
+            }
+
             excludedSources.Add(key);
             session.AddWarning(
                 $"{target.MobName}: no matching live monsters were found after {Math.Max(1, configuration.MaxEmptyClusterCycles)} complete spawn passes. " +
@@ -676,6 +703,9 @@ public sealed class FarmController
 
     private static string FormatPosition(Vector3 position)
         => $"({position.X:F1}, {position.Y:F1}, {position.Z:F1})";
+
+    private static int CountSpawnPoints(IReadOnlyList<SpawnCluster> clusters)
+        => clusters.Sum(x => x.SpawnPoints.Count);
 
     private bool HasAlternateSource(FarmTarget target)
     {

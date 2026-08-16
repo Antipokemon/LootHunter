@@ -14,7 +14,7 @@ public interface IMobDropDatabase
     string GetItemName(uint itemId);
     bool IsResolving(uint itemId);
     string? GetResolutionError(uint itemId);
-    Task EnsureSourcesResolvedAsync(IEnumerable<uint> itemIds, CancellationToken cancellationToken);
+    Task EnsureSourcesResolvedAsync(IEnumerable<uint> itemIds, CancellationToken cancellationToken, bool includeKnownSources = false);
     void RefreshTravelDestinations();
 }
 

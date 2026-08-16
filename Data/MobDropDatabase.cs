@@ -136,7 +136,7 @@ public sealed class MobDropDatabase : IMobDropDatabase, IDisposable
         return 3;
     }
 
-    public async Task EnsureSourcesResolvedAsync(IEnumerable<uint> itemIds, CancellationToken cancellationToken)
+    public async Task EnsureSourcesResolvedAsync(IEnumerable<uint> itemIds, CancellationToken cancellationToken, bool includeKnownSources = false)
     {
         if (!IsReady)
             return;
@@ -144,13 +144,14 @@ public sealed class MobDropDatabase : IMobDropDatabase, IDisposable
         var tasks = new List<Task>();
         foreach (var itemId in itemIds.Where(x => x != 0).Distinct())
         {
-            if (GetSourcesForItem(itemId).Count > 0)
+            if (!includeKnownSources && GetSourcesForItem(itemId).Count > 0)
                 continue;
 
             Task resolutionTask;
             lock (resolutionLock)
             {
-                if (!sourceResolutionTasks.TryGetValue(itemId, out resolutionTask!))
+                if (!sourceResolutionTasks.TryGetValue(itemId, out resolutionTask!) ||
+                    (includeKnownSources && resolutionTask.IsCompleted))
                 {
                     resolutionTask = ResolveMissingItemAsync(itemId);
                     sourceResolutionTasks[itemId] = resolutionTask;
@@ -423,7 +424,7 @@ public sealed class MobDropDatabase : IMobDropDatabase, IDisposable
                 DropItemIds = new HashSet<uint>(npcDropIds),
             };
 
-            AddSource(itemId, source);
+            MergeSource(itemId, source);
         }
 
         SortSources();
@@ -450,14 +451,67 @@ public sealed class MobDropDatabase : IMobDropDatabase, IDisposable
     }
 
     private void AddSource(uint itemId, MobSource source)
+        => UpsertSource(itemId, source, mergeExisting: false);
+
+    private void MergeSource(uint itemId, MobSource source)
+        => UpsertSource(itemId, source, mergeExisting: true);
+
+    private void UpsertSource(uint itemId, MobSource source, bool mergeExisting)
     {
         if (!byItem.TryGetValue(itemId, out var sources))
             byItem[itemId] = sources = [];
-        if (!sources.Any(x => x.BNpcNameId == source.BNpcNameId && x.TerritoryId == source.TerritoryId))
+
+        var existingIndex = sources.FindIndex(x => x.BNpcNameId == source.BNpcNameId && x.TerritoryId == source.TerritoryId);
+        if (existingIndex < 0)
+        {
             sources.Add(source);
+        }
+        else if (mergeExisting)
+        {
+            var merged = MergeSourceData(sources[existingIndex], source);
+            ReplaceSourceReferences(merged);
+            sources = byItem[itemId];
+            existingIndex = sources.FindIndex(x => x.BNpcNameId == source.BNpcNameId && x.TerritoryId == source.TerritoryId);
+            if (existingIndex < 0)
+                sources.Add(merged);
+            else
+                sources[existingIndex] = merged;
+        }
 
         if (!itemNames.ContainsKey(itemId))
             itemNames[itemId] = allItemNames.GetValueOrDefault(itemId) ?? $"Item {itemId}";
+    }
+
+    private MobSource MergeSourceData(MobSource existing, MobSource addition)
+    {
+        var points = existing.Clusters
+            .SelectMany(x => x.SpawnPoints)
+            .Concat(addition.Clusters.SelectMany(x => x.SpawnPoints))
+            .Distinct()
+            .ToList();
+        var clusters = BuildClusters(points);
+        var dropItemIds = existing.DropItemIds.Concat(addition.DropItemIds).ToHashSet();
+
+        return existing with
+        {
+            MobName = string.IsNullOrWhiteSpace(existing.MobName) ? addition.MobName : existing.MobName,
+            TerritoryName = string.IsNullOrWhiteSpace(existing.TerritoryName) ? addition.TerritoryName : existing.TerritoryName,
+            MobLevel = existing.MobLevel ?? addition.MobLevel,
+            NearestAetheryte = SelectAetheryte(existing.TerritoryId, clusters),
+            Clusters = clusters,
+            DropItemIds = dropItemIds,
+        };
+    }
+
+    private void ReplaceSourceReferences(MobSource source)
+    {
+        foreach (var itemId in byItem.Keys.ToList())
+        {
+            var sources = byItem[itemId];
+            var index = sources.FindIndex(x => x.BNpcNameId == source.BNpcNameId && x.TerritoryId == source.TerritoryId);
+            if (index >= 0)
+                sources[index] = source;
+        }
     }
 
     private void SortSources()
