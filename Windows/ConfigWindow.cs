@@ -74,6 +74,15 @@ public sealed class ConfigWindow : Window
             changed = true;
         }
 
+        var scanRadius = config.MobScanRadius;
+        ImGui.SetNextItemWidth(130f);
+        if (ImGui.InputFloat("Mob scan radius (yalms)", ref scanRadius, 5f, 20f))
+        {
+            config.MobScanRadius = Math.Clamp(scanRadius, 20f, 200f);
+            changed = true;
+        }
+        ImGui.TextDisabled("LootHunter scans for the current farm mob while traveling and interrupts navigation to fight it.");
+
         var preset = config.BossModPresetName;
         ImGui.SetNextItemWidth(280f);
         if (ImGui.InputText("BossModReborn autorotation preset", ref preset, 120))
@@ -104,9 +113,26 @@ public sealed class ConfigWindow : Window
 
         var settle = config.LootSettleMilliseconds;
         ImGui.SetNextItemWidth(130f);
-        if (ImGui.InputInt("Loot settle delay (ms)", ref settle, 100, 500))
+        if (ImGui.InputInt("Loot stable window (ms)", ref settle, 100, 250))
         {
-            config.LootSettleMilliseconds = Math.Clamp(settle, 250, 10000);
+            config.LootSettleMilliseconds = Math.Clamp(settle, 250, 3000);
+            changed = true;
+        }
+
+        var lootTimeout = config.LootWaitTimeoutMilliseconds;
+        ImGui.SetNextItemWidth(130f);
+        if (ImGui.InputInt("Loot wait timeout (ms)", ref lootTimeout, 250, 1000))
+        {
+            config.LootWaitTimeoutMilliseconds = Math.Clamp(lootTimeout, 1000, 15000);
+            changed = true;
+        }
+        ImGui.TextDisabled("After a kill, LootHunter waits for the actual inventory event and then for counts to stabilize.");
+
+        var navFailures = config.MaxNavigationFailuresPerSource;
+        ImGui.SetNextItemWidth(130f);
+        if (ImGui.InputInt("Max navigation failures per source", ref navFailures))
+        {
+            config.MaxNavigationFailuresPerSource = Math.Clamp(navFailures, 1, 10);
             changed = true;
         }
 
@@ -123,6 +149,13 @@ public sealed class ConfigWindow : Window
             if (ImGui.InputInt("Navigation timeout (seconds)", ref navTimeout))
             {
                 config.NavigationTimeoutSeconds = Math.Clamp(navTimeout, 15, 300);
+                changed = true;
+            }
+
+            var navStall = config.NavigationStallSeconds;
+            if (ImGui.InputInt("Navigation stall timeout (seconds)", ref navStall))
+            {
+                config.NavigationStallSeconds = Math.Clamp(navStall, 5, 60);
                 changed = true;
             }
 

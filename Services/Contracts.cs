@@ -18,10 +18,12 @@ public interface IMobDropDatabase
     void RefreshTravelDestinations();
 }
 
-public interface IInventoryService
+public interface IInventoryService : IDisposable
 {
+    long ChangeVersion { get; }
     uint GetItemCount(uint itemId);
     int GetFreeNormalInventorySlots();
+    Task<bool> WaitForChangeAsync(long afterVersion, TimeSpan timeout, CancellationToken cancellationToken);
 }
 
 public interface IRoutePlanner
@@ -46,13 +48,25 @@ public interface ITravelService
     void Abort();
 }
 
+public enum NavigationMoveResult
+{
+    Arrived,
+    Interrupted,
+    Failed,
+}
+
 public interface INavigationService
 {
     bool IsAvailable { get; }
     bool IsReady { get; }
     bool IsRunning { get; }
     Task<bool> WaitUntilReadyAsync(CancellationToken cancellationToken);
-    Task<bool> MoveToAsync(Vector3 destination, float stopDistance, bool fly, CancellationToken cancellationToken);
+    Task<NavigationMoveResult> MoveToAsync(
+        Vector3 destination,
+        float stopDistance,
+        bool fly,
+        CancellationToken cancellationToken,
+        Func<bool>? interruptRequested = null);
     Vector3? SnapToFloor(Vector3 destination);
     void Stop();
 }

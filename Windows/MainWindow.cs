@@ -222,11 +222,12 @@ public sealed class MainWindow : Window
         }
 
         uint? removeItemId = null;
-        if (ImGui.BeginTable("LootItems", 5, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp))
+        if (ImGui.BeginTable("LootItems", 6, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp))
         {
             ImGui.TableSetupColumn("On", ImGuiTableColumnFlags.WidthFixed, 36f);
             ImGui.TableSetupColumn("Item");
             ImGui.TableSetupColumn("Quantity", ImGuiTableColumnFlags.WidthFixed, 105f);
+            ImGui.TableSetupColumn("In inventory", ImGuiTableColumnFlags.WidthFixed, 90f);
             ImGui.TableSetupColumn("Sources", ImGuiTableColumnFlags.WidthFixed, 70f);
             ImGui.TableSetupColumn("", ImGuiTableColumnFlags.WidthFixed, 64f);
             ImGui.TableHeadersRow();
@@ -262,6 +263,10 @@ public sealed class MainWindow : Window
                 ImGui.EndDisabled();
 
                 ImGui.TableSetColumnIndex(3);
+                var inventoryCount = plugin.Inventory.GetItemCount(entry.ItemId);
+                ImGui.TextUnformatted(inventoryCount.ToString());
+
+                ImGui.TableSetColumnIndex(4);
                 var sourceCount = plugin.MobDatabase.GetSourcesForItem(entry.ItemId).Count;
                 if (sourceCount > 0)
                 {
@@ -279,7 +284,7 @@ public sealed class MainWindow : Window
                         ImGui.SetTooltip(resolutionError);
                 }
 
-                ImGui.TableSetColumnIndex(4);
+                ImGui.TableSetColumnIndex(5);
                 ImGui.BeginDisabled(plugin.FarmController.Session.IsRunning);
                 if (ImGui.SmallButton("Remove"))
                     removeItemId = entry.ItemId;

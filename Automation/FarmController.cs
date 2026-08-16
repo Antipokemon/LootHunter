@@ -31,6 +31,7 @@ public sealed class FarmController
     private readonly Dictionary<uint, uint> sessionStartCounts = [];
     private readonly Dictionary<uint, uint> goals = [];
     private readonly HashSet<MobSourceKey> excludedSources = [];
+    private readonly Dictionary<MobSourceKey, int> navigationFailures = [];
 
     public FarmController(
         Configuration configuration,
@@ -75,6 +76,7 @@ public sealed class FarmController
 
         session.Reset();
         excludedSources.Clear();
+        navigationFailures.Clear();
         pauseRequested = false;
         cancellation?.Dispose();
         cancellation = new CancellationTokenSource();
@@ -291,6 +293,12 @@ public sealed class FarmController
             }
         }
 
+        // Inventory is authoritative. Recheck it before spending time or gil traveling.
+        UpdateProgress();
+        if (!TargetStillUseful(target))
+            return true;
+        EnsureInventorySpace();
+
         if (clientState.TerritoryType != target.TerritoryId)
         {
             if (target.NearestAetheryte is null)
@@ -307,6 +315,10 @@ public sealed class FarmController
                 excludedSources.Add(new MobSourceKey(target.BNpcNameId, target.TerritoryId));
                 return false;
             }
+
+            UpdateProgress();
+            if (!TargetStillUseful(target))
+                return true;
         }
 
         SetState(FarmState.WaitingForZone, "Waiting for navigation data");
@@ -317,6 +329,7 @@ public sealed class FarmController
             return false;
         }
 
+        var sawAnyMobAtSource = false;
         foreach (var cluster in OrderClustersByDistance(target.Clusters))
         {
             token.ThrowIfCancellationRequested();
@@ -333,56 +346,119 @@ public sealed class FarmController
                     token.ThrowIfCancellationRequested();
                     await WaitIfPausedAsync(token);
 
+                    UpdateProgress();
                     if (!TargetStillUseful(target))
                         return true;
+                    EnsureInventorySpace();
 
-                    var localTarget = targets.FindTarget(target.BNpcNameId, objectTable.LocalPlayer?.Position, 90f);
-                    if (localTarget is not null)
+                    // Clear any currently visible targets before moving to the next marker.
+                    while (FindNearbyTarget(target) is { } localTarget)
                     {
                         sawMobThisCycle = true;
+                        sawAnyMobAtSource = true;
                         if (!await KillAndRecordAsync(target, localTarget, token))
                             return false;
+
+                        UpdateProgress();
                         if (!TargetStillUseful(target))
                             return true;
-
-                        // Prefer additional nearby spawns before moving again.
-                        while ((localTarget = targets.FindTarget(target.BNpcNameId, objectTable.LocalPlayer?.Position, 90f)) is not null)
-                        {
-                            token.ThrowIfCancellationRequested();
-                            await WaitIfPausedAsync(token);
-                            if (!await KillAndRecordAsync(target, localTarget, token))
-                                return false;
-                            if (!TargetStillUseful(target))
-                                return true;
-                        }
+                        EnsureInventorySpace();
                     }
 
-                    var snapped = navigation.SnapToFloor(spawnPoint) ?? spawnPoint;
+                    var snapped = navigation.SnapToFloor(spawnPoint);
+                    if (snapped is null)
+                    {
+                        if (RegisterNavigationFailure(target,
+                                $"Spawn coordinate {FormatPosition(spawnPoint)} is not on reachable vnavmesh terrain."))
+                            return false;
+                        continue;
+                    }
+
                     var player = objectTable.LocalPlayer;
                     if (player is null)
                         return false;
 
-                    var distance = Vector3.Distance(player.Position, snapped);
+                    var distance = Vector3.Distance(player.Position, snapped.Value);
                     if (configuration.AutoMount && distance >= configuration.AutoMountMinimumDistance && !mount.IsMounted)
                     {
                         SetState(FarmState.Mounting, $"Mounting for {distance:F0} yalms of travel");
                         await mount.MountAsync(token);
                     }
 
-                    SetState(FarmState.Navigating, $"Moving through {target.MobName} spawn cluster {cluster.AreaIndex}/{target.Clusters.Count}");
-                    var fly = configuration.UseFlight && mount.IsMounted && mount.CanFly;
-                    if (!await navigation.MoveToAsync(snapped, 8f, fly, token))
-                        continue;
+                    var reachedSpawn = false;
+                    while (!reachedSpawn && TargetStillUseful(target))
+                    {
+                        token.ThrowIfCancellationRequested();
+                        await WaitIfPausedAsync(token);
+
+                        // Scan again immediately before issuing movement.
+                        if (FindNearbyTarget(target) is { } beforeMoveTarget)
+                        {
+                            sawMobThisCycle = true;
+                            sawAnyMobAtSource = true;
+                            if (!await KillAndRecordAsync(target, beforeMoveTarget, token))
+                                return false;
+                            UpdateProgress();
+                            continue;
+                        }
+
+                        SetState(FarmState.Navigating,
+                            $"Moving through {target.MobName} spawn cluster {cluster.AreaIndex}/{target.Clusters.Count}; scanning en route");
+                        var fly = configuration.UseFlight && mount.IsMounted && mount.CanFly;
+                        var moveResult = await navigation.MoveToAsync(
+                            snapped.Value,
+                            8f,
+                            fly,
+                            token,
+                            () => !TargetStillUseful(target) || FindNearbyTarget(target) is not null);
+
+                        if (!TargetStillUseful(target))
+                            return true;
+
+                        switch (moveResult)
+                        {
+                            case NavigationMoveResult.Arrived:
+                                reachedSpawn = true;
+                                ClearNavigationFailures(target);
+                                break;
+
+                            case NavigationMoveResult.Interrupted:
+                                // vnavmesh was stopped because a matching mob became visible.
+                                // Fetch a fresh object wrapper after stopping, kill it, then resume
+                                // toward the same spawn point if more drops are still required.
+                                if (FindNearbyTarget(target) is { } interceptedTarget)
+                                {
+                                    sawMobThisCycle = true;
+                                    sawAnyMobAtSource = true;
+                                    if (!await KillAndRecordAsync(target, interceptedTarget, token))
+                                        return false;
+                                    UpdateProgress();
+                                }
+                                break;
+
+                            case NavigationMoveResult.Failed:
+                                if (RegisterNavigationFailure(target,
+                                        $"Navigation failed or stalled near {FormatPosition(snapped.Value)}."))
+                                    return false;
+                                reachedSpawn = true; // abandon this point for this pass
+                                break;
+                        }
+                    }
+
+                    if (!TargetStillUseful(target))
+                        return true;
 
                     SetState(FarmState.SearchingForMob, $"Searching for {target.MobName}");
-                    var battleNpc = targets.FindTarget(target.BNpcNameId, snapped, 75f)
-                        ?? targets.FindTarget(target.BNpcNameId, objectTable.LocalPlayer?.Position, 90f);
+                    var battleNpc = targets.FindTarget(target.BNpcNameId, snapped.Value, Math.Max(75f, configuration.MobScanRadius))
+                        ?? FindNearbyTarget(target);
                     if (battleNpc is null)
                         continue;
 
                     sawMobThisCycle = true;
+                    sawAnyMobAtSource = true;
                     if (!await KillAndRecordAsync(target, battleNpc, token))
                         return false;
+                    UpdateProgress();
                     if (!TargetStillUseful(target))
                         return true;
                 }
@@ -390,6 +466,7 @@ public sealed class FarmController
                 if (!sawMobThisCycle)
                     session.EmptySpawnCycles++;
 
+                UpdateProgress();
                 if (!TargetStillUseful(target))
                     return true;
 
@@ -404,6 +481,16 @@ public sealed class FarmController
             }
         }
 
+        if (!sawAnyMobAtSource)
+        {
+            var key = new MobSourceKey(target.BNpcNameId, target.TerritoryId);
+            excludedSources.Add(key);
+            session.AddWarning(
+                $"{target.MobName}: no matching live monsters were found after {Math.Max(1, configuration.MaxEmptyClusterCycles)} complete spawn passes. " +
+                "This source was disabled for the current farm session instead of retrying indefinitely.");
+            return false;
+        }
+
         session.AddWarning($"{target.MobName}: all known spawn clusters were exhausted; route will be re-planned.");
         if (HasAlternateSource(target))
             excludedSources.Add(new MobSourceKey(target.BNpcNameId, target.TerritoryId));
@@ -415,6 +502,13 @@ public sealed class FarmController
     private async Task<bool> KillAndRecordAsync(FarmTarget farmTarget, IBattleNpc battleNpc, CancellationToken token)
     {
         navigation.Stop();
+
+        // The inventory can change while traveling or while another kill is resolving.
+        // Never engage another mob once all of its requested drops are already satisfied.
+        UpdateProgress();
+        if (!TargetStillUseful(farmTarget))
+            return true;
+        EnsureInventorySpace();
 
         var observedSafety = levelSafety.CheckObserved(battleNpc);
         if (!observedSafety.IsSafe)
@@ -434,13 +528,22 @@ public sealed class FarmController
         if (Vector3.Distance(player.Position, battleNpc.Position) > configuration.CombatApproachDistance + 1f)
         {
             SetState(FarmState.Navigating, $"Approaching {farmTarget.MobName}");
-            if (!await navigation.MoveToAsync(battleNpc.Position, Math.Max(1.5f, configuration.CombatApproachDistance), false, token))
+            var approach = await navigation.MoveToAsync(
+                battleNpc.Position,
+                Math.Max(1.5f, configuration.CombatApproachDistance),
+                configuration.UseFlight && mount.IsMounted && mount.CanFly,
+                token);
+            if (approach != NavigationMoveResult.Arrived)
             {
-                session.AddWarning($"Could not approach {farmTarget.MobName}; skipping this source for the current session.");
-                excludedSources.Add(new MobSourceKey(farmTarget.BNpcNameId, farmTarget.TerritoryId));
+                RegisterNavigationFailure(farmTarget, $"Could not approach visible {farmTarget.MobName}.");
                 return false;
             }
         }
+
+        UpdateProgress();
+        if (!TargetStillUseful(farmTarget))
+            return true;
+        EnsureInventorySpace();
 
         if (mount.IsMounted)
         {
@@ -453,7 +556,11 @@ public sealed class FarmController
             }
         }
 
-        var before = farmTarget.RelevantDropItemIds.ToDictionary(x => x, inventory.GetItemCount);
+        var before = farmTarget.RelevantDropItemIds
+            .Where(goals.ContainsKey)
+            .ToDictionary(x => x, inventory.GetItemCount);
+        var inventoryVersionBeforeKill = inventory.ChangeVersion;
+
         targets.SetTarget(battleNpc);
         SetState(FarmState.EngagingMob, $"Engaging {farmTarget.MobName}");
         var result = await combat.KillAsync(battleNpc, token);
@@ -465,20 +572,110 @@ public sealed class FarmController
         }
 
         session.Kills++;
-        SetState(FarmState.WaitingForLoot, "Waiting for loot to settle");
-        await DelayWithPauseAsync(TimeSpan.FromMilliseconds(Math.Max(250, configuration.LootSettleMilliseconds)), token);
-
-        foreach (var itemId in farmTarget.RelevantDropItemIds)
-        {
-            var after = inventory.GetItemCount(itemId);
-            var prior = before.GetValueOrDefault(itemId);
-            if (after > prior)
-                session.DropsObtained += checked((int)Math.Min((uint)int.MaxValue, after - prior));
-        }
-
+        SetState(FarmState.WaitingForLoot, "Waiting for inventory to receive loot");
+        await WaitForLootSettlementAsync(before, inventoryVersionBeforeKill, token);
         UpdateProgress();
         return true;
     }
+
+    private async Task WaitForLootSettlementAsync(
+        IReadOnlyDictionary<uint, uint> before,
+        long inventoryVersionBeforeKill,
+        CancellationToken token)
+    {
+        var timeout = TimeSpan.FromMilliseconds(Math.Clamp(configuration.LootWaitTimeoutMilliseconds, 1000, 15000));
+        var stableWindow = TimeSpan.FromMilliseconds(Math.Clamp(configuration.LootSettleMilliseconds, 250, 3000));
+        var deadline = DateTime.UtcNow + timeout;
+        var lastCounts = before.ToDictionary(x => x.Key, x => inventory.GetItemCount(x.Key));
+        DateTime? lastRelevantChangeAt = null;
+        var observedVersion = inventoryVersionBeforeKill;
+
+        if (HasRelevantInventoryIncrease(before, lastCounts))
+        {
+            lastRelevantChangeAt = DateTime.UtcNow;
+            UpdateProgress();
+        }
+
+        while (DateTime.UtcNow < deadline)
+        {
+            token.ThrowIfCancellationRequested();
+            await WaitIfPausedAsync(token);
+
+            var now = DateTime.UtcNow;
+            if (lastRelevantChangeAt is { } changedAt && now - changedAt >= stableWindow)
+                return;
+
+            var remaining = deadline - now;
+            if (remaining <= TimeSpan.Zero)
+                break;
+
+            var wait = lastRelevantChangeAt is { } lastChange
+                ? stableWindow - (now - lastChange)
+                : TimeSpan.FromMilliseconds(500);
+            if (wait <= TimeSpan.Zero)
+                wait = TimeSpan.FromMilliseconds(50);
+            if (wait > remaining)
+                wait = remaining;
+
+            await inventory.WaitForChangeAsync(observedVersion, wait, token);
+            observedVersion = inventory.ChangeVersion;
+
+            var current = before.Keys.ToDictionary(x => x, inventory.GetItemCount);
+            var relevantChanged = current.Any(x => x.Value != lastCounts.GetValueOrDefault(x.Key));
+            if (relevantChanged)
+            {
+                lastCounts = current;
+                lastRelevantChangeAt = DateTime.UtcNow;
+                UpdateProgress();
+            }
+        }
+
+        // No relevant inventory event means this kill simply produced none of the
+        // requested drops. A late event will still be caught by the next mandatory
+        // inventory check before movement/engagement, so it cannot be double-counted.
+        UpdateProgress();
+    }
+
+    private static bool HasRelevantInventoryIncrease(
+        IReadOnlyDictionary<uint, uint> before,
+        IReadOnlyDictionary<uint, uint> after)
+        => before.Any(x => after.GetValueOrDefault(x.Key) > x.Value);
+
+    private IBattleNpc? FindNearbyTarget(FarmTarget target)
+        => targets.FindTarget(
+            target.BNpcNameId,
+            objectTable.LocalPlayer?.Position,
+            Math.Clamp(configuration.MobScanRadius, 20f, 200f));
+
+    private void EnsureInventorySpace()
+    {
+        if (inventory.GetFreeNormalInventorySlots() <= 0)
+            throw new InvalidOperationException("Your normal inventory is full. LootHunter stopped before traveling or engaging another monster.");
+    }
+
+    private bool RegisterNavigationFailure(FarmTarget target, string reason)
+    {
+        var key = new MobSourceKey(target.BNpcNameId, target.TerritoryId);
+        var failures = navigationFailures.GetValueOrDefault(key) + 1;
+        navigationFailures[key] = failures;
+        var maximum = Math.Clamp(configuration.MaxNavigationFailuresPerSource, 1, 10);
+
+        session.AddWarning($"{target.MobName}: {reason} Navigation failure {failures}/{maximum}.");
+        if (failures < maximum)
+            return false;
+
+        excludedSources.Add(key);
+        session.StatusMessage = $"Skipping {target.MobName}: navigation failed {failures} times for this source.";
+        session.AddWarning($"{target.MobName}: source disabled for this farm session after repeated unreachable/stalled navigation.");
+        navigation.Stop();
+        return true;
+    }
+
+    private void ClearNavigationFailures(FarmTarget target)
+        => navigationFailures.Remove(new MobSourceKey(target.BNpcNameId, target.TerritoryId));
+
+    private static string FormatPosition(Vector3 position)
+        => $"({position.X:F1}, {position.Y:F1}, {position.Z:F1})";
 
     private bool HasAlternateSource(FarmTarget target)
     {
@@ -525,6 +722,18 @@ public sealed class FarmController
                     current >= x.Value ? 0u : x.Value - current);
             })
             .OrderBy(x => x.ItemName, StringComparer.OrdinalIgnoreCase));
+
+        // Session drops are derived from actual inventory deltas instead of being
+        // attributed to a kill. This remains correct even if the loot event arrives
+        // late, between kills, or while LootHunter is moving.
+        ulong obtained = 0;
+        foreach (var (itemId, startCount) in sessionStartCounts)
+        {
+            var current = inventory.GetItemCount(itemId);
+            if (current > startCount)
+                obtained += current - startCount;
+        }
+        session.DropsObtained = (int)Math.Min((ulong)int.MaxValue, obtained);
     }
 
     private IReadOnlyList<SpawnCluster> OrderClustersByDistance(IReadOnlyList<SpawnCluster> clusters)

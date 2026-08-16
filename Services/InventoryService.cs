@@ -1,10 +1,25 @@
+using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
 
 namespace LootHunter.Services;
 
-public sealed unsafe class InventoryService : IInventoryService
+public sealed class InventoryService : IInventoryService
 {
-    public uint GetItemCount(uint itemId)
+    private readonly IGameInventory gameInventory;
+    private readonly object signalLock = new();
+    private TaskCompletionSource<bool> changeSignal = NewSignal();
+    private long changeVersion;
+    private bool disposed;
+
+    public InventoryService(IGameInventory gameInventory)
+    {
+        this.gameInventory = gameInventory;
+        gameInventory.InventoryChangedRaw += OnInventoryChanged;
+    }
+
+    public long ChangeVersion => Interlocked.Read(ref changeVersion);
+
+    public unsafe uint GetItemCount(uint itemId)
     {
         if (itemId == 0)
             return 0;
@@ -13,7 +28,7 @@ public sealed unsafe class InventoryService : IInventoryService
         return manager == null ? 0u : (uint)Math.Max(0, manager->GetInventoryItemCount(itemId));
     }
 
-    public int GetFreeNormalInventorySlots()
+    public unsafe int GetFreeNormalInventorySlots()
     {
         var manager = InventoryManager.Instance();
         if (manager == null)
@@ -36,4 +51,54 @@ public sealed unsafe class InventoryService : IInventoryService
 
         return free;
     }
+
+    public async Task<bool> WaitForChangeAsync(long afterVersion, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        if (ChangeVersion > afterVersion)
+            return true;
+
+        Task signal;
+        lock (signalLock)
+        {
+            if (ChangeVersion > afterVersion)
+                return true;
+            signal = changeSignal.Task;
+        }
+
+        try
+        {
+            await signal.WaitAsync(timeout, cancellationToken);
+            return ChangeVersion > afterVersion;
+        }
+        catch (TimeoutException)
+        {
+            return ChangeVersion > afterVersion;
+        }
+    }
+
+    private void OnInventoryChanged(IReadOnlyCollection<Dalamud.Game.Inventory.InventoryEventArgTypes.InventoryEventArgs> _)
+    {
+        Interlocked.Increment(ref changeVersion);
+
+        TaskCompletionSource<bool> completed;
+        lock (signalLock)
+        {
+            completed = changeSignal;
+            changeSignal = NewSignal();
+        }
+        completed.TrySetResult(true);
+    }
+
+    public void Dispose()
+    {
+        if (disposed)
+            return;
+        disposed = true;
+        gameInventory.InventoryChangedRaw -= OnInventoryChanged;
+        lock (signalLock)
+            changeSignal.TrySetCanceled();
+    }
+
+    private static TaskCompletionSource<bool> NewSignal()
+        => new(TaskCreationOptions.RunContinuationsAsynchronously);
 }

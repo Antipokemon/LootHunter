@@ -26,11 +26,13 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IDutyState DutyState { get; private set; } = null!;
     [PluginService] internal static IPluginLog Log { get; private set; } = null!;
     [PluginService] internal static IFramework Framework { get; private set; } = null!;
+    [PluginService] internal static IGameInventory GameInventory { get; private set; } = null!;
 
     public Configuration Configuration { get; }
     public LootListService LootLists { get; }
     public MobDropDatabase MobDatabase { get; }
     public FarmController FarmController { get; }
+    public InventoryService Inventory { get; }
 
     private readonly WindowSystem windowSystem = new("LootHunter");
     private readonly MainWindow mainWindow;
@@ -43,7 +45,7 @@ public sealed class Plugin : IDalamudPlugin
         MobDatabase = new MobDropDatabase(DataManager, AetheryteList, Log);
         _ = MobDatabase.InitializeAsync(Framework);
 
-        var inventory = new InventoryService();
+        Inventory = new InventoryService(GameInventory);
         var planner = new RoutePlanner(MobDatabase);
         var safety = new LevelSafetyService(PlayerState, Configuration);
         var travel = new TravelService(PluginInterface, ClientState, Configuration);
@@ -54,7 +56,7 @@ public sealed class Plugin : IDalamudPlugin
 
         FarmController = new FarmController(
             Configuration,
-            inventory,
+            Inventory,
             MobDatabase,
             planner,
             safety,
@@ -90,6 +92,7 @@ public sealed class Plugin : IDalamudPlugin
     {
         FarmController.Stop();
         MobDatabase.Dispose();
+        Inventory.Dispose();
         PluginInterface.UiBuilder.Draw -= windowSystem.Draw;
         PluginInterface.UiBuilder.OpenMainUi -= ToggleMainUi;
         PluginInterface.UiBuilder.OpenConfigUi -= ToggleConfigUi;
