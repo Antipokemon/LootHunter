@@ -22,5 +22,24 @@ public sealed class TargetService(IObjectTable objectTable, ITargetManager targe
             .FirstOrDefault();
     }
 
+    public IBattleNpc? FindHostileTarget(float maxDistance)
+    {
+        var player = objectTable.LocalPlayer;
+        if (player is null)
+            return null;
+
+        return objectTable
+            .OfType<IBattleNpc>()
+            .Where(x => x.BattleNpcKind == BattleNpcSubKind.Combatant)
+            .Where(x => x.IsTargetable && x.CurrentHp > 0)
+            .Where(x => x.StatusFlags.HasFlag(StatusFlags.Hostile | StatusFlags.InCombat))
+            .Where(x => x.TargetObjectId == player.GameObjectId)
+            .Select(x => new { Mob = x, Distance = Vector3.Distance(player.Position, x.Position) })
+            .Where(x => x.Distance <= maxDistance)
+            .OrderBy(x => x.Distance)
+            .Select(x => x.Mob)
+            .FirstOrDefault();
+    }
+
     public void SetTarget(IBattleNpc target) => targetManager.Target = target;
 }

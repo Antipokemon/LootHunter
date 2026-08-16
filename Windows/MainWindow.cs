@@ -28,8 +28,6 @@ public sealed class MainWindow : Window
     {
         DrawHeader();
         ImGui.Separator();
-        DrawRequirements();
-        ImGui.Separator();
 
         var list = GetSelectedList();
         if (list is null)
@@ -51,7 +49,7 @@ public sealed class MainWindow : Window
         var selected = GetSelectedList();
         var preview = selected?.Name ?? "Select a loot list";
 
-        ImGui.SetNextItemWidth(280f);
+        ImGui.SetNextItemWidth(250f);
         if (ImGui.BeginCombo("Loot list", preview))
         {
             foreach (var list in lists)
@@ -66,7 +64,7 @@ public sealed class MainWindow : Window
         }
 
         ImGui.SameLine();
-        ImGui.SetNextItemWidth(180f);
+        ImGui.SetNextItemWidth(150f);
         ImGui.InputText("##NewListName", ref newListName, 80);
         ImGui.SameLine();
         if (ImGui.Button("New list"))
@@ -85,6 +83,22 @@ public sealed class MainWindow : Window
             selectedListId = plugin.LootLists.Lists.FirstOrDefault()?.Id;
         }
         ImGui.EndDisabled();
+
+        selected = GetSelectedList();
+        if (selected is not null)
+        {
+            var enabled = selected.Enabled;
+            if (ImGui.Checkbox("List enabled", ref enabled))
+            {
+                if (!enabled && plugin.FarmController.ActiveListId == selected.Id)
+                    plugin.FarmController.Stop();
+                plugin.LootLists.SetEnabled(selected, enabled);
+            }
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button("Compact list"))
+            plugin.ToggleLootListUi(selected?.Id);
 
         ImGui.SameLine();
         if (ImGui.Button("Settings"))
@@ -161,7 +175,7 @@ public sealed class MainWindow : Window
             var results = plugin.MobDatabase.SearchDropItems(itemSearch, 150);
             if (results.Count == 0)
             {
-                ImGui.TextDisabled("No monster-drop items matched that filter.");
+                DrawExactItemLookup();
             }
             else
             {
@@ -174,9 +188,7 @@ public sealed class MainWindow : Window
                     foreach (var result in results)
                     {
                         var alreadyAdded = list.Items.Any(x => x.ItemId == result.ItemId);
-                        var sourceText = result.SourceCount == 0
-                            ? (plugin.MobDatabase.IsResolving(result.ItemId) ? "Looking up..." : "Lookup")
-                            : $"{result.SourceCount} source{(result.SourceCount == 1 ? string.Empty : "s")}";
+                        var sourceText = $"{result.SourceCount} source{(result.SourceCount == 1 ? string.Empty : "s")}";
 
                         ImGui.TableNextRow();
                         ImGui.TableSetColumnIndex(0);
@@ -184,8 +196,6 @@ public sealed class MainWindow : Window
                         if (ImGui.Selectable($"{result.Name}##DropItem{result.ItemId}", false))
                         {
                             plugin.LootLists.AddItem(list, result.ItemId, 1);
-                            if (result.SourceCount == 0)
-                                _ = plugin.MobDatabase.EnsureSourcesResolvedAsync([result.ItemId], CancellationToken.None);
                             itemSearch = string.Empty;
                             ImGui.CloseCurrentPopup();
                         }
@@ -211,6 +221,36 @@ public sealed class MainWindow : Window
 
         if (list.Id == plugin.FarmController.ActiveListId)
             ImGui.TextDisabled("Changes to this list are applied to the active farming run.");
+    }
+
+    private void DrawExactItemLookup()
+    {
+        var candidate = plugin.MobDatabase.FindExactItem(itemSearch);
+        if (candidate is null)
+        {
+            ImGui.TextDisabled("No open-world monster drops matched that filter.");
+            return;
+        }
+
+        if (plugin.MobDatabase.IsResolving(candidate.ItemId))
+        {
+            ImGui.TextDisabled($"Checking {candidate.Name}...");
+            return;
+        }
+
+        var error = plugin.MobDatabase.GetResolutionError(candidate.ItemId);
+        if (!string.IsNullOrWhiteSpace(error))
+        {
+            ImGui.TextDisabled($"No usable open-world source found for {candidate.Name}.");
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip(error);
+            return;
+        }
+
+        ImGui.TextUnformatted(candidate.Name);
+        ImGui.SameLine();
+        if (ImGui.SmallButton($"Verify source##VerifyDrop{candidate.ItemId}"))
+            _ = plugin.MobDatabase.EnsureSourcesResolvedAsync([candidate.ItemId], CancellationToken.None);
     }
 
     private void DrawItems(LootList list)
@@ -248,6 +288,12 @@ public sealed class MainWindow : Window
 
                 ImGui.TableSetColumnIndex(1);
                 ImGui.TextUnformatted(plugin.MobDatabase.GetItemName(entry.ItemId));
+                if (ImGui.IsItemHovered()
+                    && ImGui.GetIO().KeyCtrl
+                    && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
+                {
+                    removeItemId = entry.ItemId;
+                }
                 ImGui.TextDisabled($"ID {entry.ItemId}");
 
                 ImGui.TableSetColumnIndex(2);
@@ -304,6 +350,7 @@ public sealed class MainWindow : Window
             session.IsRunning
             || !plugin.FarmController.RequiredPluginsAvailable
             || !plugin.MobDatabase.IsReady
+            || !list.Enabled
             || list.Items.All(x => !x.Enabled));
         if (ImGui.Button("Start farming", new Vector2(120f, 0f)))
             _ = plugin.FarmController.StartAsync(list);
@@ -366,39 +413,6 @@ public sealed class MainWindow : Window
             ImGui.Spacing();
             ImGui.TextWrapped($"Error: {session.LastError.Message}");
         }
-    }
-
-    private void DrawRequirements()
-    {
-        if (!ImGui.CollapsingHeader("Requirements", ImGuiTreeNodeFlags.DefaultOpen))
-            return;
-
-        if (!ImGui.BeginTable("PluginRequirements", 3, ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp))
-            return;
-
-        ImGui.TableSetupColumn("Status", ImGuiTableColumnFlags.WidthFixed, 70f);
-        ImGui.TableSetupColumn("Plugin", ImGuiTableColumnFlags.WidthFixed, 145f);
-        ImGui.TableSetupColumn("Details");
-        ImGui.TableHeadersRow();
-
-        foreach (var requirement in plugin.FarmController.PluginRequirements)
-        {
-            ImGui.TableNextRow();
-            ImGui.TableSetColumnIndex(0);
-            ImGui.TextColored(
-                requirement.Available ? new Vector4(0.35f, 0.85f, 0.45f, 1f) : new Vector4(0.95f, 0.35f, 0.35f, 1f),
-                requirement.Available ? "Ready" : "Missing");
-
-            ImGui.TableSetColumnIndex(1);
-            ImGui.TextUnformatted(requirement.Name);
-            if (requirement.Mandatory)
-                ImGui.TextDisabled("Required");
-
-            ImGui.TableSetColumnIndex(2);
-            ImGui.TextWrapped(requirement.Detail);
-        }
-
-        ImGui.EndTable();
     }
 
     private LootList? GetSelectedList()

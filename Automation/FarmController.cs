@@ -1,4 +1,5 @@
 using System.Numerics;
+using Dalamud.Game.ClientState.Objects.Enums;
 using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Plugin.Services;
 using LootHunter.Models;
@@ -75,26 +76,43 @@ public sealed class FarmController
 
     public FarmSession Session => session;
     public Guid? ActiveListId => session.IsRunning ? activeList?.Id : null;
-    public bool RequiredPluginsAvailable => travel.IsAvailable && navigation.IsAvailable && combat.IsAvailable;
+    public bool RequiredPluginsAvailable
+        => travel.IsAvailable
+           && navigation.IsAvailable
+           && combat.IsAvailable
+           && (!configuration.AvoidAreaAttacks || combat.IsAreaAvoidanceAvailable);
     public IReadOnlyList<PluginRequirementStatus> PluginRequirements =>
     [
         new(
             "Lifestream",
             true,
             travel.IsAvailable,
-            travel.IsAvailable ? "Ready for teleportation." : "Install and enable Lifestream."),
+            travel.IsAvailable ? "Ready for teleportation." : "Install and enable Lifestream.",
+            "Lifestream"),
         new(
             "vnavmesh",
             true,
             navigation.IsAvailable,
-            navigation.IsAvailable ? "Ready for pathfinding and movement." : "Install and enable vnavmesh."),
+            navigation.IsAvailable ? "Ready for pathfinding and movement." : "Install and enable vnavmesh.",
+            "vnavmesh"),
         new(
             "Combat rotation",
             true,
             combat.IsAvailable,
             combat.IsAvailable
                 ? $"{combat.Name} is ready."
-                : combat.AvailabilityError ?? "Install and enable Wrath Combo or BossModReborn."),
+                : combat.AvailabilityError ?? "Install and enable Wrath Combo or BossModReborn.",
+            combat.Name == "WrathCombo" ? "Wrath Combo" : "BossModReborn"),
+        new(
+            "BossModReborn AI",
+            configuration.AvoidAreaAttacks,
+            combat.IsAreaAvoidanceAvailable,
+            combat.IsAreaAvoidanceAvailable
+                ? "Ready to route around outdoor area attacks."
+                : configuration.AvoidAreaAttacks
+                    ? "Install and enable BossModReborn to use area-attack avoidance."
+                    : "Optional while area-attack avoidance is disabled.",
+            "BossModReborn"),
     ];
 
     public Task StartAsync(LootList list)
@@ -122,6 +140,7 @@ public sealed class FarmController
             return;
         pauseRequested = true;
         navigation.Stop();
+        combat.SetMovementPaused(true);
         SetState(FarmState.Paused, "Paused");
     }
 
@@ -130,6 +149,7 @@ public sealed class FarmController
         if (!session.IsRunning || !pauseRequested)
             return;
         pauseRequested = false;
+        combat.SetMovementPaused(false);
         SetState(FarmState.Replanning, "Resuming");
     }
 
@@ -276,6 +296,8 @@ public sealed class FarmController
 
     private async Task ValidatePreflightAsync(LootList list, CancellationToken token)
     {
+        if (!list.Enabled)
+            throw new InvalidOperationException("Enable the selected loot list before starting LootHunter.");
         if (!clientState.IsLoggedIn || objectTable.LocalPlayer is null)
             throw new InvalidOperationException("Log into a character before starting LootHunter.");
         if (objectTable.LocalPlayer.CurrentHp == 0)
@@ -294,6 +316,8 @@ public sealed class FarmController
             throw new InvalidOperationException("vnavmesh IPC is unavailable. Install and enable vnavmesh.");
         if (!combat.IsAvailable)
             throw new InvalidOperationException(combat.AvailabilityError ?? "BossModReborn IPC is unavailable.");
+        if (configuration.AvoidAreaAttacks && !combat.IsAreaAvoidanceAvailable)
+            throw new InvalidOperationException("BossModReborn AI is unavailable. Install and enable BossModReborn or disable area-attack avoidance in Combat settings.");
         if (combat.PrepareForSession() is { Length: > 0 } combatError)
             throw new InvalidOperationException(combatError);
         if (inventory.GetFreeNormalInventorySlots() <= 0)
@@ -732,16 +756,53 @@ public sealed class FarmController
         var inventoryVersionBeforeKill = inventory.ChangeVersion;
 
         targets.SetTarget(battleNpc);
-        SetState(FarmState.EngagingMob, $"Engaging {farmTarget.MobName}");
-        var result = await KillWithPositioningAsync(farmTarget, battleNpc, combatDistance, token);
-        if (!result.Success)
+        if (combat.BeginEncounter() is { Length: > 0 } avoidanceError)
         {
-            session.AddWarning(result.Error ?? $"Combat failed against {farmTarget.MobName}.");
+            session.AddWarning(avoidanceError);
             excludedSources.Add(new MobSourceKey(farmTarget.BNpcNameId, farmTarget.TerritoryId));
             return false;
         }
 
-        session.Kills++;
+        try
+        {
+            IBattleNpc? combatTarget = battleNpc;
+            var firstTarget = true;
+            while (combatTarget is not null)
+            {
+                var targetName = GetBattleNpcName(combatTarget, farmTarget.MobName);
+                if (!firstTarget)
+                {
+                    var additionalSafety = levelSafety.CheckObserved(combatTarget);
+                    if (!additionalSafety.IsSafe)
+                        session.AddWarning($"{additionalSafety.Message} It is already attacking the player, so LootHunter will finish the encounter.");
+                    EnsureInventorySpace();
+                }
+
+                session.CurrentMobName = targetName;
+                targets.SetTarget(combatTarget);
+                SetState(FarmState.EngagingMob, firstTarget
+                    ? $"Engaging {targetName}"
+                    : $"Engaging additional attacker: {targetName}");
+
+                var result = await KillWithPositioningAsync(farmTarget, combatTarget, combatDistance, token);
+                if (!result.Success)
+                {
+                    session.AddWarning(result.Error ?? $"Combat failed against {targetName}.");
+                    excludedSources.Add(new MobSourceKey(farmTarget.BNpcNameId, farmTarget.TerritoryId));
+                    return false;
+                }
+
+                session.Kills++;
+                firstTarget = false;
+                combatTarget = await WaitForHostileTargetAsync(token);
+            }
+        }
+        finally
+        {
+            combat.EndEncounter();
+        }
+
+        session.CurrentMobName = farmTarget.MobName;
         SetState(FarmState.WaitingForLoot, "Waiting for inventory to receive loot");
         await WaitForLootSettlementAsync(before, inventoryVersionBeforeKill, token);
         UpdateProgress();
@@ -771,6 +832,17 @@ public sealed class FarmController
                 {
                     positioningError = "The local player became unavailable during combat.";
                     break;
+                }
+
+                var targetName = GetBattleNpcName(battleNpc, farmTarget.MobName);
+                if (combat.IsControllingMovement)
+                {
+                    outOfRangeSince = null;
+                    SetState(FarmState.EngagingMob, combat.IsAvoidingAreaAttack
+                        ? $"Avoiding an area attack while fighting {targetName}"
+                        : $"Engaging {targetName}");
+                    await Task.WhenAny(combatTask, Task.Delay(250, token));
+                    continue;
                 }
 
                 if (DistanceToTarget(player.Position, battleNpc.Position, horizontalOnly: true) > combatDistance + CombatReapproachTolerance)
@@ -845,6 +917,40 @@ public sealed class FarmController
                 }
             }
         }
+    }
+
+    private async Task<IBattleNpc?> WaitForHostileTargetAsync(CancellationToken token)
+    {
+        var startedAt = DateTime.UtcNow;
+        var deadline = startedAt.AddSeconds(1.5);
+        var scanRadius = Math.Clamp(configuration.HostileScanRadius, 10f, 80f);
+
+        while (DateTime.UtcNow < deadline)
+        {
+            token.ThrowIfCancellationRequested();
+            await WaitIfPausedAsync(token);
+
+            var hostile = targets.FindHostileTarget(scanRadius);
+            if (hostile is not null)
+                return hostile;
+
+            var player = objectTable.LocalPlayer;
+            if (player is null)
+                return null;
+            if (DateTime.UtcNow - startedAt >= TimeSpan.FromMilliseconds(350)
+                && !player.StatusFlags.HasFlag(StatusFlags.InCombat))
+                return null;
+
+            await Task.Delay(150, token);
+        }
+
+        return targets.FindHostileTarget(scanRadius);
+    }
+
+    private static string GetBattleNpcName(IBattleNpc target, string fallback)
+    {
+        var name = target.Name.ToString();
+        return string.IsNullOrWhiteSpace(name) ? fallback : name;
     }
 
     private async Task WaitForLootSettlementAsync(

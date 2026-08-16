@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using Dalamud.Game.Command;
 using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Ipc;
@@ -63,6 +64,10 @@ public sealed class CombatProvider : ICombatProvider
     private readonly ICallGateSubscriber<string> bossGetActivePreset;
     private readonly ICallGateSubscriber<string, bool> bossSetActivePreset;
     private readonly ICallGateSubscriber<bool> bossClearActivePreset;
+    private readonly ICallGateSubscriber<int> bossForbiddenZonesCount;
+    private readonly ICallGateSubscriber<string> bossAiGetPreset;
+    private readonly ICallGateSubscriber<string, object> bossAiSetPreset;
+    private readonly ICommandManager commandManager;
     private readonly ITargetManager targetManager;
     private readonly IPlayerState playerState;
     private readonly Configuration configuration;
@@ -70,13 +75,18 @@ public sealed class CombatProvider : ICombatProvider
     private uint preparedClassJobId;
     private Guid? wrathLease;
     private ActiveCombatProvider activeProvider;
+    private bool avoidanceActive;
+    private string? activePresetBeforeAvoidance;
+    private string aiPresetBeforeAvoidance = string.Empty;
 
     public CombatProvider(
         IDalamudPluginInterface pluginInterface,
+        ICommandManager commandManager,
         ITargetManager targetManager,
         IPlayerState playerState,
         Configuration configuration)
     {
+        this.commandManager = commandManager;
         this.targetManager = targetManager;
         this.playerState = playerState;
         this.configuration = configuration;
@@ -92,6 +102,9 @@ public sealed class CombatProvider : ICombatProvider
         bossGetActivePreset = pluginInterface.GetIpcSubscriber<string>("BossMod.Presets.GetActive");
         bossSetActivePreset = pluginInterface.GetIpcSubscriber<string, bool>("BossMod.Presets.SetActive");
         bossClearActivePreset = pluginInterface.GetIpcSubscriber<bool>("BossMod.Presets.ClearActive");
+        bossForbiddenZonesCount = pluginInterface.GetIpcSubscriber<int>("BossMod.Hints.ForbiddenZonesCount");
+        bossAiGetPreset = pluginInterface.GetIpcSubscriber<string>("BossMod.AI.GetPreset");
+        bossAiSetPreset = pluginInterface.GetIpcSubscriber<string, object>("BossMod.AI.SetPreset");
     }
 
     public string Name => activeProvider switch
@@ -108,6 +121,16 @@ public sealed class CombatProvider : ICombatProvider
         => IsAvailable
             ? null
             : "WrathCombo IPC is unavailable. Install/enable WrathCombo, or install/enable BossModReborn with preset IPC available.";
+
+    public bool IsAreaAvoidanceAvailable
+        => bossForbiddenZonesCount.HasFunction
+           && bossAiGetPreset.HasFunction
+           && bossAiSetPreset.HasAction
+           && commandManager.Commands.ContainsKey("/bmrai");
+
+    public bool IsControllingMovement => avoidanceActive;
+
+    public bool IsAvoidingAreaAttack => avoidanceActive && SafeBossForbiddenZonesCount() > 0;
 
     private bool IsWrathAvailable
         => wrathIpcReady.HasFunction
@@ -164,8 +187,64 @@ public sealed class CombatProvider : ICombatProvider
             : await KillWithBossModAsync(target, cancellationToken);
     }
 
+    public string? BeginEncounter()
+    {
+        if (!configuration.AvoidAreaAttacks || avoidanceActive)
+            return null;
+        if (!IsAreaAvoidanceAvailable)
+            return "BossModReborn AI is unavailable; LootHunter cannot avoid area attacks.";
+
+        activePresetBeforeAvoidance = SafeBossGetActivePreset();
+        aiPresetBeforeAvoidance = SafeBossGetAiPreset();
+
+        try
+        {
+            // With Wrath handling actions, an empty BossMod AI preset keeps BossMod focused
+            // on movement and its outdoor forbidden zones. The BossMod combat fallback uses
+            // the same preset for both movement and actions.
+            var encounterPreset = activeProvider == ActiveCombatProvider.BossModReborn
+                ? GetRequestedBossModPresetName()
+                : string.Empty;
+            bossAiSetPreset.InvokeAction(encounterPreset);
+
+            if (!commandManager.ProcessCommand("/bmrai on"))
+            {
+                RestoreBossModStateAfterAvoidance();
+                return "BossModReborn rejected the command to enable AI movement.";
+            }
+
+            avoidanceActive = true;
+            return null;
+        }
+        catch (Exception ex)
+        {
+            RestoreBossModStateAfterAvoidance();
+            return $"BossModReborn AI movement could not start: {ex.Message}";
+        }
+    }
+
+    public void SetMovementPaused(bool paused)
+    {
+        if (!avoidanceActive)
+            return;
+        try { commandManager.ProcessCommand(paused ? "/bmrai off" : "/bmrai on"); }
+        catch { }
+    }
+
+    public void EndEncounter()
+    {
+        if (!avoidanceActive)
+            return;
+
+        avoidanceActive = false;
+        try { commandManager.ProcessCommand("/bmrai off"); }
+        catch { }
+        RestoreBossModStateAfterAvoidance();
+    }
+
     public void EndSession()
     {
+        EndEncounter();
         var lease = wrathLease;
         wrathLease = null;
         activeProvider = ActiveCombatProvider.None;
@@ -274,8 +353,7 @@ public sealed class CombatProvider : ICombatProvider
             return new(true);
 
         var originalPreset = SafeBossGetActivePreset();
-        var configuredPreset = configuration.BossModPresetName.Trim();
-        var requestedPreset = string.IsNullOrWhiteSpace(configuredPreset) ? LootHunterPresetName : configuredPreset;
+        var requestedPreset = GetRequestedBossModPresetName();
         var changedPreset = !string.Equals(originalPreset, requestedPreset, StringComparison.OrdinalIgnoreCase);
 
         if (changedPreset && !bossSetActivePreset.InvokeFunc(requestedPreset))
@@ -426,6 +504,46 @@ public sealed class CombatProvider : ICombatProvider
     {
         try { return bossGetActivePreset.HasFunction ? bossGetActivePreset.InvokeFunc() : null; }
         catch { return null; }
+    }
+
+    private string SafeBossGetAiPreset()
+    {
+        try { return bossAiGetPreset.HasFunction ? bossAiGetPreset.InvokeFunc() : string.Empty; }
+        catch { return string.Empty; }
+    }
+
+    private int SafeBossForbiddenZonesCount()
+    {
+        try { return bossForbiddenZonesCount.HasFunction ? bossForbiddenZonesCount.InvokeFunc() : 0; }
+        catch { return 0; }
+    }
+
+    private string GetRequestedBossModPresetName()
+    {
+        var configuredPreset = configuration.BossModPresetName.Trim();
+        return string.IsNullOrWhiteSpace(configuredPreset) ? LootHunterPresetName : configuredPreset;
+    }
+
+    private void RestoreBossModStateAfterAvoidance()
+    {
+        try
+        {
+            if (bossAiSetPreset.HasAction)
+                bossAiSetPreset.InvokeAction(aiPresetBeforeAvoidance);
+        }
+        catch { }
+
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(activePresetBeforeAvoidance))
+                bossSetActivePreset.InvokeFunc(activePresetBeforeAvoidance);
+            else if (bossClearActivePreset.HasFunction)
+                bossClearActivePreset.InvokeFunc();
+        }
+        catch { }
+
+        activePresetBeforeAvoidance = null;
+        aiPresetBeforeAvoidance = string.Empty;
     }
 
     private enum WrathSetResult

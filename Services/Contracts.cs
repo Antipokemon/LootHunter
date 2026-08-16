@@ -11,6 +11,7 @@ public interface IMobDropDatabase
     string? LoadError { get; }
     IReadOnlyList<MobSource> GetSourcesForItem(uint itemId);
     IReadOnlyList<ItemSearchResult> SearchDropItems(string query, int limit = 30);
+    ItemSearchResult? FindExactItem(string query);
     string GetItemName(uint itemId);
     bool IsResolving(uint itemId);
     string? GetResolutionError(uint itemId);
@@ -93,6 +94,7 @@ public interface IMountService
 public interface ITargetService
 {
     IBattleNpc? FindTarget(uint bNpcNameId, Vector3? around = null, float maxDistance = float.MaxValue);
+    IBattleNpc? FindHostileTarget(float maxDistance);
     void SetTarget(IBattleNpc target);
 }
 
@@ -101,11 +103,22 @@ public interface ICombatProvider
     string Name { get; }
     bool IsAvailable { get; }
     string? AvailabilityError { get; }
+    bool IsAreaAvoidanceAvailable { get; }
+    bool IsControllingMovement { get; }
+    bool IsAvoidingAreaAttack { get; }
     string? PrepareForSession();
+    string? BeginEncounter();
+    void SetMovementPaused(bool paused);
+    void EndEncounter();
     Task<CombatResult> KillAsync(IBattleNpc target, CancellationToken cancellationToken);
     void EndSession();
 }
 
 public sealed record CombatResult(bool Success, string? Error = null);
 
-public sealed record PluginRequirementStatus(string Name, bool Mandatory, bool Available, string Detail);
+public sealed record PluginRequirementStatus(
+    string Name,
+    bool Mandatory,
+    bool Available,
+    string Detail,
+    string InstallerSearch);

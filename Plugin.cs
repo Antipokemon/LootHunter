@@ -38,6 +38,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly WindowSystem windowSystem = new("LootHunter");
     private readonly MainWindow mainWindow;
     private readonly ConfigWindow configWindow;
+    private readonly LootListWindow lootListWindow;
 
     public Plugin()
     {
@@ -53,7 +54,7 @@ public sealed class Plugin : IDalamudPlugin
         var navigation = new NavigationService(PluginInterface, ObjectTable, Configuration);
         var targetService = new TargetService(ObjectTable, TargetManager);
         var mount = new MountService(ObjectTable, Condition, Log);
-        var combat = new CombatProvider(PluginInterface, TargetManager, PlayerState, Configuration);
+        var combat = new CombatProvider(PluginInterface, CommandManager, TargetManager, PlayerState, Configuration);
 
         FarmController = new FarmController(
             Configuration,
@@ -74,8 +75,13 @@ public sealed class Plugin : IDalamudPlugin
 
         mainWindow = new MainWindow(this);
         configWindow = new ConfigWindow(this);
+        lootListWindow = new LootListWindow(this)
+        {
+            IsOpen = Configuration.ShowCompactListWindow,
+        };
         windowSystem.AddWindow(mainWindow);
         windowSystem.AddWindow(configWindow);
+        windowSystem.AddWindow(lootListWindow);
 
         CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
@@ -104,4 +110,19 @@ public sealed class Plugin : IDalamudPlugin
     private void OnCommand(string command, string args) => ToggleMainUi();
     public void ToggleMainUi() => mainWindow.Toggle();
     public void ToggleConfigUi() => configWindow.Toggle();
+    public bool IsLootListUiOpen => lootListWindow.IsOpen;
+
+    public void SetLootListUiOpen(bool isOpen)
+    {
+        lootListWindow.IsOpen = isOpen;
+        Configuration.ShowCompactListWindow = isOpen;
+        Configuration.Save();
+    }
+
+    public void ToggleLootListUi(Guid? listId = null)
+    {
+        if (listId is { } id)
+            lootListWindow.SelectList(id);
+        lootListWindow.Toggle();
+    }
 }

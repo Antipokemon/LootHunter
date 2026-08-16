@@ -100,11 +100,14 @@ public sealed partial class MonsterLootResolver : IDisposable
         var heading = droppedBy is not null && IsHeading(droppedBy)
             ? droppedBy
             : droppedBy?.Ancestors().FirstOrDefault(IsHeading);
-
-        var table = heading?.SelectSingleNode("following-sibling::table[1]")
-            ?? document.DocumentNode.SelectSingleNode("//table[contains(@class,'item')]");
-        if (table is null)
+        if (heading is null)
             return [];
+
+        var sectionNode = heading.SelectSingleNode(
+            "following::*[self::table or self::h2 or self::h3 or self::h4][1]");
+        if (sectionNode is null || !sectionNode.Name.Equals("table", StringComparison.OrdinalIgnoreCase))
+            return [];
+        var table = sectionNode;
 
         var rows = table.SelectNodes(".//tr");
         if (rows is null || rows.Count <= 1)

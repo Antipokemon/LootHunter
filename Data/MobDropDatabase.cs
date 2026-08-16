@@ -96,10 +96,10 @@ public sealed class MobDropDatabase : IMobDropDatabase, IDisposable
         var text = query.Trim();
         var terms = text.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
-        // With no filter, show only items that are already known monster drops.
-        // Once the user types, search the full game Item sheet too. This lets the
-        // MonsterLoot fallback discover valid drops missing from supplemental data.
-        IEnumerable<KeyValuePair<uint, string>> candidates = terms.Length == 0 ? itemNames : allItemNames;
+        // Only expose items with a resolved open-world source. Unknown items must
+        // pass an explicit fallback lookup before they become selectable.
+        IEnumerable<KeyValuePair<uint, string>> candidates = itemNames
+            .Where(item => byItem.ContainsKey(item.Key));
 
         if (terms.Length > 0)
         {
@@ -121,6 +121,39 @@ public sealed class MobDropDatabase : IMobDropDatabase, IDisposable
                 item.Value,
                 byItem.GetValueOrDefault(item.Key)?.Count ?? 0))
             .ToList();
+    }
+
+    public ItemSearchResult? FindExactItem(string query)
+    {
+        if (!IsReady)
+            return null;
+
+        var text = query.Trim();
+        if (string.IsNullOrWhiteSpace(text))
+            return null;
+
+        KeyValuePair<uint, string>? match = null;
+        if (uint.TryParse(text, out var itemId) && allItemNames.TryGetValue(itemId, out var itemName))
+        {
+            match = new KeyValuePair<uint, string>(itemId, itemName);
+        }
+        else
+        {
+            foreach (var item in allItemNames)
+            {
+                if (!string.Equals(item.Value, text, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                match = item;
+                break;
+            }
+        }
+
+        return match is { } itemMatch
+            ? new ItemSearchResult(
+                itemMatch.Key,
+                itemMatch.Value,
+                byItem.GetValueOrDefault(itemMatch.Key)?.Count ?? 0)
+            : null;
     }
 
     private static int GetSearchRank(KeyValuePair<uint, string> item, string text)

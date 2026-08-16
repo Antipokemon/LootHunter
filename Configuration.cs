@@ -22,6 +22,8 @@ public sealed class Configuration : IPluginConfiguration
     public bool UseFlight { get; set; } = false;
     public float CombatApproachDistance { get; set; } = 3.5f;
     public float MobScanRadius { get; set; } = 90f;
+    public float HostileScanRadius { get; set; } = 35f;
+    public bool AvoidAreaAttacks { get; set; } = true;
     public bool TeleportOnCompletion { get; set; } = true;
     public CompletionTeleportDestination CompletionTeleportDestination { get; set; } = CompletionTeleportDestination.ResidentialDistrict;
     public string CompletionTeleportCustomCommand { get; set; } = string.Empty;
@@ -41,6 +43,8 @@ public sealed class Configuration : IPluginConfiguration
 
     // Used only by the BossModReborn fallback provider.
     public string BossModPresetName { get; set; } = string.Empty;
+
+    public bool ShowCompactListWindow { get; set; }
 
     public List<LootList> LootLists { get; set; } = [];
 

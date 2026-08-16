@@ -58,5 +58,11 @@ public sealed class LootListService
         configuration.Save();
     }
 
+    public void SetEnabled(LootList list, bool enabled)
+    {
+        list.Enabled = enabled;
+        configuration.Save();
+    }
+
     public void Save() => configuration.Save();
 }
