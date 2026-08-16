@@ -172,7 +172,9 @@ public sealed class MainWindow : Window
                     foreach (var result in results)
                     {
                         var alreadyAdded = list.Items.Any(x => x.ItemId == result.ItemId);
-                        var sourceText = $"{result.SourceCount} source{(result.SourceCount == 1 ? string.Empty : "s")}";
+                        var sourceText = result.SourceCount == 0
+                            ? (plugin.MobDatabase.IsResolving(result.ItemId) ? "Looking up..." : "Lookup")
+                            : $"{result.SourceCount} source{(result.SourceCount == 1 ? string.Empty : "s")}";
 
                         ImGui.TableNextRow();
                         ImGui.TableSetColumnIndex(0);
@@ -180,6 +182,8 @@ public sealed class MainWindow : Window
                         if (ImGui.Selectable($"{result.Name}##DropItem{result.ItemId}", false))
                         {
                             plugin.LootLists.AddItem(list, result.ItemId, 1);
+                            if (result.SourceCount == 0)
+                                _ = plugin.MobDatabase.EnsureSourcesResolvedAsync([result.ItemId], CancellationToken.None);
                             itemSearch = string.Empty;
                             ImGui.CloseCurrentPopup();
                         }
@@ -258,7 +262,22 @@ public sealed class MainWindow : Window
                 ImGui.EndDisabled();
 
                 ImGui.TableSetColumnIndex(3);
-                ImGui.TextUnformatted(plugin.MobDatabase.GetSourcesForItem(entry.ItemId).Count.ToString());
+                var sourceCount = plugin.MobDatabase.GetSourcesForItem(entry.ItemId).Count;
+                if (sourceCount > 0)
+                {
+                    ImGui.TextUnformatted(sourceCount.ToString());
+                }
+                else if (plugin.MobDatabase.IsResolving(entry.ItemId))
+                {
+                    ImGui.TextDisabled("...");
+                }
+                else
+                {
+                    ImGui.TextDisabled("0");
+                    var resolutionError = plugin.MobDatabase.GetResolutionError(entry.ItemId);
+                    if (!string.IsNullOrWhiteSpace(resolutionError) && ImGui.IsItemHovered())
+                        ImGui.SetTooltip(resolutionError);
+                }
 
                 ImGui.TableSetColumnIndex(4);
                 ImGui.BeginDisabled(plugin.FarmController.Session.IsRunning);

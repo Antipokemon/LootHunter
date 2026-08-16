@@ -8,7 +8,7 @@ using LuminaSupplemental.Excel.Services;
 
 namespace LootHunter.Data;
 
-public sealed class MobDropDatabase : IMobDropDatabase
+public sealed class MobDropDatabase : IMobDropDatabase, IDisposable
 {
     private const float ClusterDistance = 70f;
     private const float ClusterDistanceSquared = ClusterDistance * ClusterDistance;
@@ -17,8 +17,17 @@ public sealed class MobDropDatabase : IMobDropDatabase
     private readonly IDataManager dataManager;
     private readonly IAetheryteList aetherytes;
     private readonly IPluginLog log;
+    private readonly MonsterLootResolver monsterLootResolver;
     private readonly Dictionary<uint, List<MobSource>> byItem = [];
     private readonly Dictionary<uint, string> itemNames = [];
+    private readonly Dictionary<uint, string> allItemNames = [];
+    private readonly Dictionary<uint, HashSet<uint>> dropNpcIdsByItem = [];
+    private readonly Dictionary<uint, HashSet<uint>> dropItemsByNpc = [];
+    private readonly Dictionary<string, uint> territoryIdsByName = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<uint, Task> sourceResolutionTasks = [];
+    private readonly Dictionary<uint, string> sourceResolutionErrors = [];
+    private readonly object resolutionLock = new();
+    private IFramework? framework;
 
     public bool IsReady { get; private set; }
     public bool IsLoading { get; private set; }
@@ -29,6 +38,7 @@ public sealed class MobDropDatabase : IMobDropDatabase
         this.dataManager = dataManager;
         this.aetherytes = aetherytes;
         this.log = log;
+        monsterLootResolver = new MonsterLootResolver(log);
     }
 
     public async Task InitializeAsync(IFramework framework)
@@ -36,14 +46,12 @@ public sealed class MobDropDatabase : IMobDropDatabase
         if (IsReady || IsLoading)
             return;
 
+        this.framework = framework;
         IsLoading = true;
         LoadError = null;
 
         try
         {
-            // IDataManager sheet access and IAetheryteList enumeration must run on
-            // Dalamud's framework thread. Plugin construction itself is not guaranteed
-            // to run there.
             await framework.Run(Load);
         }
         catch (Exception ex)
@@ -62,7 +70,23 @@ public sealed class MobDropDatabase : IMobDropDatabase
         => byItem.TryGetValue(itemId, out var sources) ? sources : [];
 
     public string GetItemName(uint itemId)
-        => itemNames.TryGetValue(itemId, out var name) ? name : $"Item {itemId}";
+        => itemNames.TryGetValue(itemId, out var name)
+            ? name
+            : allItemNames.TryGetValue(itemId, out var allName)
+                ? allName
+                : $"Item {itemId}";
+
+    public bool IsResolving(uint itemId)
+    {
+        lock (resolutionLock)
+            return sourceResolutionTasks.TryGetValue(itemId, out var task) && !task.IsCompleted;
+    }
+
+    public string? GetResolutionError(uint itemId)
+    {
+        lock (resolutionLock)
+            return sourceResolutionErrors.GetValueOrDefault(itemId);
+    }
 
     public IReadOnlyList<ItemSearchResult> SearchDropItems(string query, int limit = 30)
     {
@@ -71,7 +95,11 @@ public sealed class MobDropDatabase : IMobDropDatabase
 
         var text = query.Trim();
         var terms = text.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        IEnumerable<KeyValuePair<uint, string>> candidates = itemNames;
+
+        // With no filter, show only items that are already known monster drops.
+        // Once the user types, search the full game Item sheet too. This lets the
+        // MonsterLoot fallback discover valid drops missing from supplemental data.
+        IEnumerable<KeyValuePair<uint, string>> candidates = terms.Length == 0 ? itemNames : allItemNames;
 
         if (terms.Length > 0)
         {
@@ -95,17 +123,33 @@ public sealed class MobDropDatabase : IMobDropDatabase
             .ToList();
     }
 
-    private static int GetSearchRank(KeyValuePair<uint, string> item, string text)
+    public async Task EnsureSourcesResolvedAsync(IEnumerable<uint> itemIds, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(text))
-            return 0;
-        if (string.Equals(item.Value, text, StringComparison.OrdinalIgnoreCase))
-            return 0;
-        if (item.Value.StartsWith(text, StringComparison.OrdinalIgnoreCase))
-            return 1;
-        if (item.Key.ToString().StartsWith(text, StringComparison.OrdinalIgnoreCase))
-            return 2;
-        return 3;
+        if (!IsReady)
+            return;
+
+        var tasks = new List<Task>();
+        foreach (var itemId in itemIds.Where(x => x != 0).Distinct())
+        {
+            if (GetSourcesForItem(itemId).Count > 0)
+                continue;
+
+            Task resolutionTask;
+            lock (resolutionLock)
+            {
+                if (!sourceResolutionTasks.TryGetValue(itemId, out resolutionTask!))
+                {
+                    resolutionTask = ResolveMissingItemAsync(itemId);
+                    sourceResolutionTasks[itemId] = resolutionTask;
+                }
+            }
+            tasks.Add(resolutionTask);
+        }
+
+        if (tasks.Count == 0)
+            return;
+
+        await Task.WhenAll(tasks).WaitAsync(cancellationToken);
     }
 
     public void RefreshTravelDestinations()
@@ -120,18 +164,61 @@ public sealed class MobDropDatabase : IMobDropDatabase
         }
     }
 
+    private async Task ResolveMissingItemAsync(uint itemId)
+    {
+        try
+        {
+            var itemName = GetItemName(itemId);
+            var records = await monsterLootResolver.ResolveAsync(itemId, itemName, CancellationToken.None).ConfigureAwait(false);
+            if (records.Count == 0)
+            {
+                lock (resolutionLock)
+                    sourceResolutionErrors[itemId] = "No monster-drop locations were returned by the MonsterLoot wiki fallback.";
+                return;
+            }
+
+            if (framework is null)
+                throw new InvalidOperationException("Dalamud framework service is unavailable for MonsterLoot source merging.");
+
+            await framework.Run(() => MergeFallbackSources(itemId, records));
+
+            if (GetSourcesForItem(itemId).Count == 0)
+            {
+                lock (resolutionLock)
+                    sourceResolutionErrors[itemId] = "Monster-drop information was found, but LootHunter could not map it to a usable open-world monster source.";
+            }
+            else
+            {
+                lock (resolutionLock)
+                    sourceResolutionErrors.Remove(itemId);
+            }
+        }
+        catch (Exception ex)
+        {
+            lock (resolutionLock)
+                sourceResolutionErrors[itemId] = ex.Message;
+            log.Warning(ex, "MonsterLoot fallback source resolution failed for item {ItemId}.", itemId);
+        }
+    }
+
     private void Load()
     {
         IsReady = false;
         LoadError = null;
         byItem.Clear();
         itemNames.Clear();
+        allItemNames.Clear();
+        dropNpcIdsByItem.Clear();
+        dropItemsByNpc.Clear();
+        territoryIdsByName.Clear();
+        lock (resolutionLock)
+        {
+            sourceResolutionTasks.Clear();
+            sourceResolutionErrors.Clear();
+        }
 
         try
         {
-            // We only need the raw supplemental IDs/positions here. Passing Dalamud's
-            // ClientLanguage would be incorrect because CsvLoader expects Lumina.Data.Language;
-            // the optional population arguments are unnecessary for LootHunter.
             var drops = CsvLoader.LoadResource<MobDrop>(
                 CsvLoader.MobDropResourceName,
                 true,
@@ -153,12 +240,35 @@ public sealed class MobDropDatabase : IMobDropDatabase
             if (npcNames is null || territories is null || maps is null || items is null)
                 throw new InvalidOperationException("One or more required game-data sheets are unavailable.");
 
-            var dropItemsByNpc = drops
-                .Where(x => x.ItemId != 0 && x.BNpcNameId != 0)
-                .GroupBy(x => x.BNpcNameId)
-                .ToDictionary(
-                    x => x.Key,
-                    x => x.Select(y => y.ItemId).ToHashSet());
+            foreach (var item in items)
+            {
+                if (item.RowId == 0)
+                    continue;
+                var name = item.Name.ExtractText();
+                if (!string.IsNullOrWhiteSpace(name))
+                    allItemNames[item.RowId] = name;
+            }
+
+            foreach (var territory in territories)
+            {
+                if (territory.RowId == 0 || territory.ContentFinderCondition.RowId != 0 || territory.QuestBattle.RowId != 0)
+                    continue;
+                var name = territory.PlaceName.ValueNullable?.Name.ExtractText();
+                if (string.IsNullOrWhiteSpace(name))
+                    continue;
+                territoryIdsByName.TryAdd(name, territory.RowId);
+            }
+
+            foreach (var group in drops.Where(x => x.ItemId != 0 && x.BNpcNameId != 0).GroupBy(x => x.ItemId))
+                dropNpcIdsByItem[group.Key] = group.Select(x => x.BNpcNameId).ToHashSet();
+
+            foreach (var group in drops.Where(x => x.ItemId != 0 && x.BNpcNameId != 0).GroupBy(x => x.BNpcNameId))
+                dropItemsByNpc[group.Key] = group.Select(x => x.ItemId).ToHashSet();
+
+            // Build the picker index from every known drop link, regardless of whether a
+            // spawn can currently be resolved. This prevents valid items from disappearing.
+            foreach (var itemId in dropNpcIdsByItem.Keys)
+                itemNames[itemId] = allItemNames.GetValueOrDefault(itemId) ?? $"Item {itemId}";
 
             var spawnsByNpc = spawns
                 .Where(x => x.BNpcNameId != 0 && x.TerritoryTypeId != 0)
@@ -220,36 +330,19 @@ public sealed class MobDropDatabase : IMobDropDatabase
                         sourceCache[key] = source;
                     }
 
-                    if (!byItem.TryGetValue(drop.ItemId, out var sources))
-                        byItem[drop.ItemId] = sources = [];
-                    if (!sources.Any(x => x.BNpcNameId == source.BNpcNameId && x.TerritoryId == source.TerritoryId))
-                        sources.Add(source);
+                    AddSource(drop.ItemId, source);
                 }
             }
 
-            foreach (var itemId in byItem.Keys.ToList())
-            {
-                if (items.TryGetRow(itemId, out var item))
-                {
-                    var name = item.Name.ExtractText();
-                    itemNames[itemId] = string.IsNullOrWhiteSpace(name) ? $"Item {itemId}" : name;
-                }
-                else
-                {
-                    itemNames[itemId] = $"Item {itemId}";
-                }
+            SortSources();
 
-                byItem[itemId] = byItem[itemId]
-                    .OrderByDescending(x => x.Clusters.Sum(c => c.SpawnPoints.Count))
-                    .ThenBy(x => x.TerritoryName, StringComparer.OrdinalIgnoreCase)
-                    .ToList();
-            }
-
-            IsReady = byItem.Count > 0;
+            IsReady = itemNames.Count > 0;
             if (!IsReady)
-                throw new InvalidOperationException("Monster-drop data loaded, but no usable open-world monster spawns were resolved.");
+                throw new InvalidOperationException("Monster-drop data loaded, but no drop items were indexed.");
 
-            log.Information("LootHunter loaded {ItemCount} drop items, {SourceCount} monster-zone sources, and {SpawnCount} spawn points from LuminaSupplemental.",
+            log.Information(
+                "LootHunter indexed {DropItemCount} known drop items ({ResolvedItemCount} with static spawn sources), {SourceCount} monster-zone sources, and {SpawnCount} spawn points from LuminaSupplemental.",
+                itemNames.Count,
                 byItem.Count,
                 sourceCache.Count,
                 sourceCache.Values.Sum(x => x.Clusters.Sum(c => c.SpawnPoints.Count)));
@@ -259,6 +352,109 @@ public sealed class MobDropDatabase : IMobDropDatabase
             LoadError = ex.Message;
             IsReady = false;
             log.Error(ex, "LootHunter failed to build the monster-drop database.");
+        }
+    }
+
+    private void MergeFallbackSources(uint itemId, IReadOnlyList<MonsterLootFallbackRecord> records)
+    {
+        var npcNames = dataManager.GetExcelSheet<BNpcName>();
+        var territories = dataManager.GetExcelSheet<TerritoryType>();
+        var maps = dataManager.GetExcelSheet<Map>();
+        if (npcNames is null || territories is null || maps is null)
+            return;
+
+        var candidateNpcIds = dropNpcIdsByItem.GetValueOrDefault(itemId) ?? [];
+
+        foreach (var record in records)
+        {
+            var bNpcNameId = ResolveBNpcNameId(record.MobName, candidateNpcIds, npcNames);
+            if (bNpcNameId == 0)
+            {
+                log.Warning("MonsterLoot fallback could not map mob '{MobName}' for item {ItemId} to a BNpcName row.", record.MobName, itemId);
+                continue;
+            }
+
+            if (!territoryIdsByName.TryGetValue(record.TerritoryName, out var territoryId) ||
+                !territories.TryGetRow(territoryId, out var territory))
+            {
+                log.Warning("MonsterLoot fallback could not map territory '{Territory}' for item {ItemId}.", record.TerritoryName, itemId);
+                continue;
+            }
+
+            Map? map = null;
+            if (territory.Map.RowId != 0 && maps.TryGetRow(territory.Map.RowId, out var foundMap))
+                map = foundMap;
+
+            var point = NormalizeToWorld(new Vector3(record.MapX, record.MapY, 0f), map);
+            if (point is null)
+                continue;
+
+            if (!dropNpcIdsByItem.TryGetValue(itemId, out var itemNpcIds))
+                dropNpcIdsByItem[itemId] = itemNpcIds = [];
+            itemNpcIds.Add(bNpcNameId);
+
+            if (!dropItemsByNpc.TryGetValue(bNpcNameId, out var npcDropIds))
+                dropItemsByNpc[bNpcNameId] = npcDropIds = [];
+            npcDropIds.Add(itemId);
+
+            var clusters = BuildClusters([point.Value]);
+            var source = new MobSource
+            {
+                BNpcNameId = bNpcNameId,
+                MobName = record.MobName,
+                TerritoryId = territoryId,
+                TerritoryName = record.TerritoryName,
+                MobLevel = record.MobLevel,
+                NearestAetheryte = SelectAetheryte(territoryId, clusters),
+                Clusters = clusters,
+                DropItemIds = new HashSet<uint>(npcDropIds),
+            };
+
+            AddSource(itemId, source);
+        }
+
+        SortSources();
+    }
+
+    private static uint ResolveBNpcNameId(string mobName, IReadOnlySet<uint> candidateNpcIds, Lumina.Excel.ExcelSheet<BNpcName> npcNames)
+    {
+        foreach (var candidate in candidateNpcIds)
+        {
+            if (!npcNames.TryGetRow(candidate, out var row))
+                continue;
+            if (string.Equals(row.Singular.ExtractText(), mobName, StringComparison.OrdinalIgnoreCase))
+                return candidate;
+        }
+
+        // If supplemental data omitted the drop link entirely, fall back to a name scan.
+        foreach (var row in npcNames)
+        {
+            if (row.RowId != 0 && string.Equals(row.Singular.ExtractText(), mobName, StringComparison.OrdinalIgnoreCase))
+                return row.RowId;
+        }
+
+        return 0;
+    }
+
+    private void AddSource(uint itemId, MobSource source)
+    {
+        if (!byItem.TryGetValue(itemId, out var sources))
+            byItem[itemId] = sources = [];
+        if (!sources.Any(x => x.BNpcNameId == source.BNpcNameId && x.TerritoryId == source.TerritoryId))
+            sources.Add(source);
+
+        if (!itemNames.ContainsKey(itemId))
+            itemNames[itemId] = allItemNames.GetValueOrDefault(itemId) ?? $"Item {itemId}";
+    }
+
+    private void SortSources()
+    {
+        foreach (var itemId in byItem.Keys.ToList())
+        {
+            byItem[itemId] = byItem[itemId]
+                .OrderByDescending(x => x.Clusters.Sum(c => c.SpawnPoints.Count))
+                .ThenBy(x => x.TerritoryName, StringComparer.OrdinalIgnoreCase)
+                .ToList();
         }
     }
 
@@ -379,4 +575,6 @@ public sealed class MobDropDatabase : IMobDropDatabase
 
     private static float MapToWorld(float mapCoordinate, uint sizeFactor, int offset)
         => (float)((mapCoordinate - 1.0d - (2048.0d / sizeFactor) - (MapFactor * offset)) / MapFactor);
+
+    public void Dispose() => monsterLootResolver.Dispose();
 }

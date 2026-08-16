@@ -12,7 +12,7 @@ Required capability plugins for the first version:
 - **vnavmesh** — local pathfinding and movement
 - **BossModReborn** — combat autorotation
 
-LootHunter loads structured monster-drop and spawn data directly from the `LuminaSupplemental.Excel` NuGet package. GatherBuddyReborn was useful as a reference for how that dataset can be consumed, but it is not a runtime dependency. MonsterLootHunter is also not required at runtime; its data model was evaluated during design, while the structured LuminaSupplemental dataset is the primary source in this version.
+LootHunter loads structured monster-drop and spawn data directly from the `LuminaSupplemental.Excel` NuGet package. GatherBuddyReborn was useful as a reference for how that dataset can be consumed, but it is not a runtime dependency. MonsterLootHunter is also not required at runtime; LootHunter now implements the same on-demand Console Games Wiki fallback strategy for items whose structured LuminaSupplemental source/location data is missing or incomplete.
 
 ## Current workflow
 
@@ -101,3 +101,15 @@ The release must contain an asset named `LootHunter.zip`. The manifest download 
 ## Independence / licensing note
 
 LootHunter is independently implemented. Henchman's high-level farming behavior was used only as design inspiration; no Henchman source, library, IPC wrapper, submodule, or installation dependency is included.
+
+## Data sources
+
+LootHunter uses a layered monster-drop data strategy:
+
+- LuminaSupplemental provides the fast structured item-to-monster and spawn dataset.
+- For items whose static source/location data is missing or incomplete, LootHunter performs an on-demand lookup using the same FFXIV Console Games Wiki approach popularized by MonsterLootHunter, then maps the returned monster, level, zone, and coordinates back into Dalamud game data.
+- The MonsterLootHunter plugin itself is not required or called at runtime.
+
+The fallback is only queried when LootHunter does not already have a usable static monster source for the requested item.
+
+See `THIRD_PARTY_NOTICES.md` for third-party acknowledgements and applicable notices.

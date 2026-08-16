@@ -115,7 +115,7 @@ public sealed class FarmController
         try
         {
             SetState(FarmState.Validating, "Validating loot list and dependencies");
-            ValidatePreflight(list);
+            await ValidatePreflightAsync(list, token);
             BuildGoals(list);
             UpdateProgress();
 
@@ -193,7 +193,7 @@ public sealed class FarmController
         }
     }
 
-    private void ValidatePreflight(LootList list)
+    private async Task ValidatePreflightAsync(LootList list, CancellationToken token)
     {
         if (!clientState.IsLoggedIn || objectTable.LocalPlayer is null)
             throw new InvalidOperationException("Log into a character before starting LootHunter.");
@@ -207,7 +207,6 @@ public sealed class FarmController
             throw new InvalidOperationException(database.IsLoading
                 ? "Monster-drop data is still loading. Try again in a moment."
                 : database.LoadError ?? "Monster-drop data is not ready.");
-        database.RefreshTravelDestinations();
         if (!travel.IsAvailable)
             throw new InvalidOperationException("Lifestream IPC is unavailable. Install and enable Lifestream.");
         if (!navigation.IsAvailable)
@@ -223,6 +222,21 @@ public sealed class FarmController
         if (entries.Count == 0)
             throw new InvalidOperationException("The selected loot list has no enabled items with a positive quantity.");
 
+        var unresolved = entries
+            .Select(x => x.ItemId)
+            .Where(itemId => database.GetSourcesForItem(itemId).Count == 0)
+            .Distinct()
+            .ToList();
+        if (unresolved.Count > 0)
+        {
+            SetState(FarmState.Validating, unresolved.Count == 1
+                ? $"Looking up monster location for {database.GetItemName(unresolved[0])}"
+                : $"Looking up monster locations for {unresolved.Count} items");
+            await database.EnsureSourcesResolvedAsync(unresolved, token);
+        }
+
+        database.RefreshTravelDestinations();
+
         foreach (var entry in entries)
         {
             var sources = database.GetSourcesForItem(entry.ItemId)
@@ -230,7 +244,12 @@ public sealed class FarmController
                 .Where(x => entry.PreferredTerritoryId is null || x.TerritoryId == entry.PreferredTerritoryId)
                 .ToList();
             if (sources.Count == 0)
-                throw new InvalidOperationException($"No usable open-world monster source was found for {database.GetItemName(entry.ItemId)}.");
+            {
+                var fallbackError = database.GetResolutionError(entry.ItemId);
+                throw new InvalidOperationException(
+                    $"No usable open-world monster source was found for {database.GetItemName(entry.ItemId)}" +
+                    (string.IsNullOrWhiteSpace(fallbackError) ? "." : $". MonsterLoot fallback: {fallbackError}"));
+            }
 
             foreach (var source in sources.Where(x => x.MobLevel is null).Take(1))
                 session.AddWarning($"{source.MobName}: level is unknown in the static drop data; LootHunter will verify the live monster level before combat.");

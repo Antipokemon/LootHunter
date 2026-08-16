@@ -12,6 +12,9 @@ public interface IMobDropDatabase
     IReadOnlyList<MobSource> GetSourcesForItem(uint itemId);
     IReadOnlyList<ItemSearchResult> SearchDropItems(string query, int limit = 30);
     string GetItemName(uint itemId);
+    bool IsResolving(uint itemId);
+    string? GetResolutionError(uint itemId);
+    Task EnsureSourcesResolvedAsync(IEnumerable<uint> itemIds, CancellationToken cancellationToken);
     void RefreshTravelDestinations();
 }
 

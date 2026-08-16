@@ -89,6 +89,7 @@ public sealed class Plugin : IDalamudPlugin
     public void Dispose()
     {
         FarmController.Stop();
+        MobDatabase.Dispose();
         PluginInterface.UiBuilder.Draw -= windowSystem.Draw;
         PluginInterface.UiBuilder.OpenMainUi -= ToggleMainUi;
         PluginInterface.UiBuilder.OpenConfigUi -= ToggleConfigUi;
